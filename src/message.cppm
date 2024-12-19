@@ -41,7 +41,7 @@ public:
     std::string format() const {
         auto p = std::filesystem::path(fmt_loc_.loc.file_name());
         auto filename = p.filename().string();
-        auto str = std::format("{} [{}] [{}:{}] {}",
+        auto str = std::format("{} [{}] [{}:{}] {}\n",
             str_time(), 
             str_level(), 
             filename, 
