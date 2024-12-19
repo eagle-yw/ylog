@@ -12,7 +12,6 @@ public:
     Logger() {
         level_ = Level::Info;
         name_ = "Logger";
-        std::println("Logger created");
     }
 
     void debug(FmtLoc fmt_loc, auto &&...args) {
@@ -55,7 +54,8 @@ private:
 
     void log_it(Message log_msg) {
         //todo
-        std::println("{}",log_msg.format());
+        std::cout << log_msg.format();
+        // std::print("{}",log_msg.format());
     }
 
     std::atomic<Level> level_;
