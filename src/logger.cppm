@@ -15,24 +15,20 @@ public:
         std::println("Logger created");
     }
 
-    template <typename... Args>
-    void debug(FmtLoc fmt_loc, Args &&...args) {
-        log(Level::Debug, fmt_loc, std::forward<Args>(args)...);
+    void debug(FmtLoc fmt_loc, auto &&...args) {
+        log(Level::Debug, fmt_loc, std::forward<decltype(args)>(args)...);
     }
 
-    template <typename... Args>
-    void info(FmtLoc fmt_loc, Args &&...args) {
-        log(Level::Info, fmt_loc, std::forward<Args>(args)...);
+    void info(FmtLoc fmt_loc, auto &&...args) {
+        log(Level::Info, fmt_loc, std::forward<decltype(args)>(args)...);
     }
 
-    template <typename... Args>
-    void warning(FmtLoc fmt_loc, Args &&...args) {
-        log(Level::Warning, fmt_loc, std::forward<Args>(args)...);
+    void warning(FmtLoc fmt_loc, auto &&...args) {
+        log(Level::Warning, fmt_loc, std::forward<decltype(args)>(args)...);
     }
 
-    template <typename... Args>
-    void error(FmtLoc fmt_loc, Args &&...args) {
-        log(Level::Error, fmt_loc, std::forward<Args>(args)...);
+    void error(FmtLoc fmt_loc, auto &&...args) {
+        log(Level::Error, fmt_loc, std::forward<decltype(args)>(args)...);
     }
 
     void set_level(const Level level) {
@@ -44,8 +40,7 @@ private:
         return msg_level >= level_.load(std::memory_order_relaxed);
     }
 
-    template <typename... Args>
-    void log(Level level, FmtLoc loc_fmt, Args &&...args){
+    void log(Level level, FmtLoc loc_fmt, auto &&...args){
         bool log_enabled = level_is_enabled(level);
         if(!log_enabled){
             return;
@@ -70,7 +65,7 @@ private:
 };
 
 Logger& getDefaultLogger() {
-    static Logger default_logger;
+    static auto default_logger = Logger();
     return default_logger;
 }
 
