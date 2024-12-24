@@ -7,5 +7,5 @@ target_sources(ylog
     level.cppm
     logger.cppm
     message.cppm
-    # sinks/sinks_file.cppm
+    sinks/sink.cppm
 )
