@@ -25,6 +25,21 @@ TEST(LoggerTest, DefaultLogger){
     std::cout.rdbuf(original_buffer);
 }
 
+TEST(SinkTest, DefaultSink){
+    struct TestSink {
+        void write(std::string_view msg) { msg_ = msg;}
+        std::string_view msg_;
+    };
+    std::vector<ylog::SinkIface> vec;
+    vec.push_back(TestSink());
+
+    std::string_view except_output = "hello world";
+    vec[0].write(except_output);
+
+    auto sink = vec[0].as<TestSink>();
+    EXPECT_EQ(sink->msg_, except_output);
+}
+
 int main(int argc, char **argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
