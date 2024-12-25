@@ -25,6 +25,20 @@ TEST(LoggerTest, DefaultLogger){
     std::cout.rdbuf(original_buffer);
 }
 
+TEST(LoggerTest, AppendSink){
+    
+    struct TestSink {
+        void write(std::string_view msg) { 
+            std::print("{}", msg);
+        }
+    };
+
+    ylog::set_level(ylog::Level::Debug);
+    ylog::append_sink(TestSink());
+
+    ylog::debug("append sink test");
+}
+
 TEST(SinkTest, DefaultSink){
     struct TestSink {
         void write(std::string_view msg) { msg_ = msg;}

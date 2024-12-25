@@ -3,7 +3,7 @@ export module ylog:logger;
 import std;
 import :level;
 import :message;
-
+import :sink;
 
 namespace ylog {
 
@@ -34,6 +34,11 @@ public:
         level_ = level;
     }
 
+    template <Sink T>
+    void append_sink(T&& sink) {
+        sinks_.push_back(std::forward<T>(sink));
+    }
+
 private:
     bool level_is_enabled(Level msg_level) {
         return msg_level >= level_.load(std::memory_order_relaxed);
@@ -54,14 +59,18 @@ private:
 
     void log_it(Message log_msg) {
         //todo
-        std::cout << log_msg.format();
+        auto msg_str = log_msg.format();
+        
+        for(auto& sink : sinks_){
+            sink.write(msg_str);
+        }
+        std::cout << msg_str;
         // std::print("{}",log_msg.format());
     }
 
     std::atomic<Level> level_;
     std::string name_;
-
-    
+    std::vector<ylog::SinkIface> sinks_;    
 };
 
 Logger& getDefaultLogger() {
@@ -87,6 +96,11 @@ export void error(FmtLoc fmt_loc, auto &&...args){
 
 export void set_level(const Level level){
     getDefaultLogger().set_level(level);
+}
+
+export template <Sink T>
+void append_sink(T&& sink){
+    getDefaultLogger().append_sink(std::forward<T>(sink));
 }
 
 } // namespace ylog end
