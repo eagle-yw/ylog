@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_SCAN_FOR_MODULES ON)
 
+# For Clang, to ignore deprecated warnings
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-Wno-deprecated-declarations)
+endif()
+
 add_subdirectory(src)
 add_subdirectory(test)
 add_subdirectory(example)

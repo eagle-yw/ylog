@@ -4,6 +4,8 @@ import std;
 import :level;
 import :message;
 import :sink;
+import :sink.stdout;
+
 
 namespace ylog {
 
@@ -12,6 +14,12 @@ public:
     Logger() {
         level_ = Level::Info;
         name_ = "Logger";
+        
+        
+        sinks_.emplace_back(SinksStdout());
+        
+        
+        // append_sink(SinksStdout());
     }
 
     void debug(FmtLoc fmt_loc, auto &&...args) {
@@ -36,7 +44,7 @@ public:
 
     template <Sink T>
     void append_sink(T&& sink) {
-        sinks_.push_back(std::forward<T>(sink));
+        sinks_.emplace_back(std::forward<T>(sink));
     }
 
 private:
@@ -64,7 +72,7 @@ private:
         for(auto& sink : sinks_){
             sink.write(msg_str);
         }
-        std::cout << msg_str;
+        // std::cout << msg_str;
         // std::print("{}",log_msg.format());
     }
 

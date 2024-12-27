@@ -16,7 +16,7 @@ TEST(LoggerTest, DefaultLogger){
     
     
     auto log_output = oss.str();
-    auto except_output = std::string("[debug] [unit_test.cpp:15] default logger level is debug\n") ;
+    auto except_output = std::string("default logger level is debug\n") ;
     auto is_ok = log_output.ends_with(except_output);
     EXPECT_TRUE(is_ok);
 
@@ -26,17 +26,35 @@ TEST(LoggerTest, DefaultLogger){
 }
 
 TEST(LoggerTest, AppendSink){
-    
+
+    auto logger = ylog::Logger();
+    logger.set_level(ylog::Level::Debug);
+
+    std::string except_output = "append sink test";
     struct TestSink {
         void write(std::string_view msg) { 
-            std::print("{}", msg);
+            auto is_ok = msg.ends_with("append sink test\n");
+            EXPECT_TRUE(is_ok);
+            std::cout << msg;
         }
     };
 
-    ylog::set_level(ylog::Level::Debug);
-    ylog::append_sink(TestSink());
+    
+    logger.append_sink(TestSink());
+    logger.debug("{}", except_output);
+}
 
-    ylog::debug("append sink test");
+TEST(LoggerTest, TestSinkFile){
+    std::string except_output = "test sink file";
+    auto sink =ylog::SinkFile("test.log");
+
+    auto logger = ylog::Logger();
+    logger.set_level(ylog::Level::Debug);
+    logger.append_sink(std::move(sink));
+
+    logger.debug("{}", except_output);
+    logger.info("{}", except_output);
+    logger.error("{}", except_output);
 }
 
 TEST(SinkTest, DefaultSink){

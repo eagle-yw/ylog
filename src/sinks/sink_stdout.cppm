@@ -1,14 +1,16 @@
-module;
+export module ylog:sink.stdout;
 
-
-
-export module ylog:sinks:stdout;
+import std;
+import :sink.file;
 
 namespace ylog {
 
 class SinksStdout {
 public:
-private:
+    SinksStdout(){}
+    void write(std::string_view msg) {
+        std::cout << msg;
+    }
 };
 
 

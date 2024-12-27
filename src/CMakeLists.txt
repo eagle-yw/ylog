@@ -8,4 +8,7 @@ target_sources(ylog
     logger.cppm
     message.cppm
     sinks/sink.cppm
+    sinks/sink_file.cppm
+    sinks/sink_stdout.cppm
 )
+
