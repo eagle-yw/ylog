@@ -41,5 +41,15 @@
                 "CMAKE_BUILD_TYPE": "Debug"
             }
         }
+    ],
+    "buildPresets": [
+        {
+            "name": "gcc16",
+            "configurePreset": "gcc16"
+        },
+        {
+            "name": "gcc16-noexc",
+            "configurePreset": "gcc16-noexc"
+        }
     ]
 }
