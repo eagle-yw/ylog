@@ -5,6 +5,63 @@ stdout / 任意 ostream / 文件 / 大小轮转 / 按日 / 回调 / 环形缓冲
 `NullSink`；颜色按 sink 的 `ColorMode` 配置，只上在 pattern 的 `%^`/`%$` 区间上。
 设计取舍见 `docs/adr/`，术语见 `GLOSSARY.md`。
 
+## 在自己项目里使用
+
+Ylog 以 C++26 模块发布：`cmake --install` 装的是**模块源码**，由消费方在本地编成 BMI。没有可跨机器分发的二进制包——BMI 与编译器、标准库、是否 `-fno-exceptions` 强绑定，换个机器就得重编。
+
+```sh
+cmake --preset gcc16
+cmake --install out/build/gcc16 --prefix /your/prefix
+```
+
+依赖口径是硬约束。缺任何一条，`find_package` 会带着可直接照抄的修复片段失败，而不是让你去猜链接错误：
+
+| 约束 | 要求 |
+| --- | --- |
+| CMake | **≥ 4.5**（`import std` 的实验 GUID 只在 4.5 的 toolchain 检测里被识别）|
+| 编译器 | **GCC ≥ 16.2**；clang 未实现 P2996 静态反射，暂不支持（[#43](https://github.com/eagle-yw/ylog/issues/43)）|
+| `import std` | 消费方顶层工程须自己开启，包配置无法代劳 |
+
+最小工程：
+
+```cmake
+cmake_minimum_required(VERSION 4.5)
+
+# import std 的实验 GUID 只能由顶层工程设置
+set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "0e5b6991-d74f-4b3d-a41c-cf096e0b2508")
+set(CMAKE_CXX_MODULE_STD ON)
+
+project(app LANGUAGES CXX)
+
+find_package(Ylog 0.1 CONFIG REQUIRED)
+
+add_executable(app main.cpp)
+target_link_libraries(app PRIVATE Ylog::ylog)
+```
+
+```cpp
+// main.cpp
+import std;
+import ylog;
+
+int main() {
+    auto logger = ylog::Logger("app");
+    logger.info({}, "hello, {}", "ylog");
+
+    // 自由函数作用于默认 logger：Registry 中名为 default 的常驻槽位（ADR-0010）
+    ylog::info({}, "no logger object needed");
+}
+```
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_PREFIX_PATH=/your/prefix
+cmake --build build
+```
+
+`Ylog::ylog` 的接口属性里带着 `cxx_std_26`、`-freflection`，以及（若库以无异常构建）`YLOG_NO_EXCEPTIONS` 与 `-fno-exceptions`。**不要自行覆盖这些**：`exceptions_enabled` 在模块编译期定型，改了会与 BMI 口径不一致。
+
+只在本仓库内开发时仍可直接 `add_subdirectory`；`Ylog::ylog` 与裸名 `ylog` 指向同一目标。各能力的可运行示例见 `example/`——每项能力一个编译单元，入口清单在 `demo.cppm`。
+
 ## 构建要求
 
 工具链版本是硬约束，CI（`.github/workflows/ci.yml`）与本地必须一致：

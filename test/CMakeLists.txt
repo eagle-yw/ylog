@@ -14,6 +14,11 @@ endif()
 
 include(FetchContent)
 
+# 测试依赖只服务本仓库：关掉它们自带的安装规则，否则 cmake --install 会把
+# gtest/gmock 一并塞进 ylog 的安装前缀。
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
+
 FetchContent_Declare(
   googletest
   GIT_REPOSITORY https://github.com/google/googletest.git

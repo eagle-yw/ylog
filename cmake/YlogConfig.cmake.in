@@ -1,0 +1,33 @@
+@PACKAGE_INIT@
+
+# ylog 以 C++26 模块发布：随包安装的是模块源码，由消费方在本地编成 BMI。
+# 因此下游必须自带与库同口径的工具链。下面三条是硬前置，不是建议——
+# 缺任何一条，消费方编 ylog 的接口单元都会以难以理解的方式失败。
+
+if(CMAKE_VERSION VERSION_LESS 4.5)
+    message(FATAL_ERROR
+        "Ylog 要求 CMake >= 4.5：import std 的实验 GUID 只在 4.5 的 toolchain 检测里被识别。\n"
+        "当前 CMake ${CMAKE_VERSION}")
+endif()
+
+if(NOT CMAKE_EXPERIMENTAL_CXX_IMPORT_STD)
+    message(FATAL_ERROR
+        "Ylog 依赖 import std：请在你的顶层工程里、project() 之前开启它。\n"
+        "  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"0e5b6991-d74f-4b3d-a41c-cf096e0b2508\")\n"
+        "  set(CMAKE_CXX_MODULE_STD ON)")
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR
+        "Ylog 使用 P2996 静态反射，clang 尚未实现，目前只支持 GCC。见 issue #43。")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 16.2)
+    message(FATAL_ERROR
+        "Ylog 要求 GCC >= 16.2：16.0.1 读取聚合模块的 BMI 会报 Bad file data。\n"
+        "当前 GCC ${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+
+# -freflection、cxx_std_26 与 YLOG_NO_EXCEPTIONS 都在 Ylog::ylog 的接口属性上，
+# 下游不要自行覆盖：exceptions_enabled 在模块编译期定型，改了会与 BMI 口径不一致。
+include("${CMAKE_CURRENT_LIST_DIR}/YlogTargets.cmake")
+
+check_required_components(Ylog)
