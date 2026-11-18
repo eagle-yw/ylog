@@ -1187,9 +1187,8 @@ struct AsyncRecordingSink {
 
     auto wait_for(std::size_t count, std::chrono::milliseconds timeout) -> bool {
         std::unique_lock lock(state->mutex);
-        return state->changed.wait_for(lock, timeout, [this, count] {
-            return state->lines.size() >= count;
-        });
+        return state->changed.wait_for(lock, timeout,
+                                       [this, count] { return state->lines.size() >= count; });
     }
 
     auto snapshot() -> std::vector<std::string> {
@@ -1198,7 +1197,45 @@ struct AsyncRecordingSink {
     }
 };
 
-} // namespace
+// 收集 err_handler 的上报内容；handler 可能从多个生产者线程并发调用。
+struct ErrorReports {
+    struct State {
+        std::mutex mutex;
+        std::vector<std::string> messages;
+    };
+
+    std::shared_ptr<State> state;
+
+    auto handler() const -> ylog::ErrorHandler {
+        auto captured = state;
+        return [captured](std::string_view text) {
+            std::lock_guard lock(captured->mutex);
+            captured->messages.emplace_back(text);
+        };
+    }
+
+    auto snapshot() const -> std::vector<std::string> {
+        std::lock_guard lock(state->mutex);
+        return state->messages;
+    }
+};
+
+// 记录行内容后再卡住，用来把工作线程钉在一次 write 上。
+struct GatedRecordingSink {
+    std::shared_ptr<AsyncRecordingSink::State> state;
+    std::counting_semaphore<64>* entered = nullptr;
+    std::counting_semaphore<64>* release = nullptr;
+
+    auto write(std::string_view line) -> void {
+        AsyncRecordingSink{state}.write(line);
+        entered->release();
+        release->acquire();
+    }
+
+    auto flush() -> void {}
+};
+
+}  // namespace
 
 TEST(AsyncLoggerTest, ConfigDefaultsMatchTheSpec) {
     auto config = ylog::AsyncLoggerConfig{.name = "async"};
@@ -1371,8 +1408,7 @@ TEST(AsyncLoggerTest, BlocksProducerWhenQueueIsFull) {
     };
 
     Gate gate;
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 1});
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 1});
     logger.append_sink(BlockingSink{&gate}, "%v");
 
     logger.info({}, "first");
@@ -1394,6 +1430,153 @@ TEST(AsyncLoggerTest, BlocksProducerWhenQueueIsFull) {
 
     gate.release.release();
     gate.release.release();
+}
+
+TEST(AsyncLoggerTest, OverrunOldestDropsOldestMessageAndReports) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async",
+                                .queue_capacity = 1,
+                                .overflow_policy = ylog::OverflowPolicy::OverrunOldest,
+                                .err_handler = reports.handler()});
+    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+
+    logger.info({}, "a");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    logger.info({}, "b");  // 占满容量为 1 的队列
+    logger.info({}, "c");  // 覆盖 b
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 1u);
+    EXPECT_NE(reported[0].find("b"), std::string::npos) << reported[0];
+
+    release.release();
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    release.release();
+
+    auto lines = AsyncRecordingSink{state}.snapshot();
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_EQ(lines[0], "a\n");
+    EXPECT_EQ(lines[1], "c\n");
+}
+
+TEST(AsyncLoggerTest, DiscardNewDropsIncomingMessageAndReports) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async",
+                                .queue_capacity = 1,
+                                .overflow_policy = ylog::OverflowPolicy::DiscardNew,
+                                .err_handler = reports.handler()});
+    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+
+    logger.info({}, "a");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    logger.info({}, "b");
+    logger.info({}, "c");  // 被丢弃
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 1u);
+    EXPECT_NE(reported[0].find("c"), std::string::npos) << reported[0];
+
+    release.release();
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    release.release();
+
+    auto lines = AsyncRecordingSink{state}.snapshot();
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_EQ(lines[0], "a\n");
+    EXPECT_EQ(lines[1], "b\n");
+}
+
+TEST(AsyncLoggerTest, NonBlockingPoliciesDoNotWaitForConsumer) {
+    for (auto policy : {ylog::OverflowPolicy::OverrunOldest, ylog::OverflowPolicy::DiscardNew}) {
+        auto state = std::make_shared<AsyncRecordingSink::State>();
+        auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+        auto entered = std::counting_semaphore<64>{0};
+        auto release = std::counting_semaphore<64>{0};
+
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async",
+                                                                .queue_capacity = 1,
+                                                                .overflow_policy = policy,
+                                                                .err_handler = reports.handler()});
+        logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+
+        logger.info({}, "seed");
+        ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+
+        std::binary_semaphore produced{0};
+        auto producer = std::jthread([&logger, &produced] {
+            for (int i = 0; i < 50; ++i) {
+                logger.info({}, "burst-{}", i);
+            }
+            produced.release();
+        });
+
+        EXPECT_TRUE(produced.try_acquire_for(std::chrono::milliseconds(500)))
+            << "非阻塞策略下生产者被消费者拖住了";
+
+        release.release(2);
+        producer.join();
+    }
+}
+
+TEST(AsyncLoggerTest, ControlMessagesAreNeverDropped) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async",
+                                .queue_capacity = 1,
+                                .overflow_policy = ylog::OverflowPolicy::DiscardNew,
+                                .err_handler = reports.handler()});
+    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+
+    logger.info({}, "a");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    logger.info({}, "b");  // 占满队列
+
+    std::binary_semaphore flushed{0};
+    auto flusher = std::jthread([&logger, &flushed] {
+        logger.flush();
+        flushed.release();
+    });
+
+    release.release();
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    release.release();
+
+    EXPECT_TRUE(flushed.try_acquire_for(std::chrono::milliseconds(2000)))
+        << "队列满时控制消息没有送达，flush 卡住了";
+}
+
+TEST(AsyncLoggerTest, BlockPolicyReportsNothing) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .queue_capacity = 1, .err_handler = reports.handler()});
+    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+
+    logger.info({}, "a");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    logger.info({}, "b");
+    release.release();
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    release.release();
+
+    EXPECT_TRUE(reports.snapshot().empty()) << "Block 策略下不应有丢弃上报";
 }
 
 int main(int argc, char** argv) {

@@ -15,7 +15,9 @@ export using ErrorHandler = std::function<void(std::string_view)>;
 
 // 队列溢出策略。构造后不可变，避免热路径读取配置时产生竞态。
 export enum class OverflowPolicy {
-    Block,
+    Block,          // 队列满时生产者等待空位
+    OverrunOldest,  // 队列满时覆盖最旧的一条消息
+    DiscardNew,     // 队列满时丢弃新来的消息
 };
 
 namespace detail {
@@ -110,6 +112,7 @@ public:
     }
 
     // 核心日志入口。SourceLocation 默认参数在调用点捕获位置。
+    // 非阻塞策略的上报在锁外进行：handler 可能重入日志，持锁回调会自锁。
     template <typename... Args>
     auto log(SourceLocation location,
              Level level,
@@ -120,16 +123,51 @@ public:
         }
         auto message =
             Message(level, name_, location, std::format(format, std::forward<Args>(args)...));
+        auto overrun = std::string{};  // OverrunOldest 覆盖掉的最旧消息
+        auto discarded = false;        // DiscardNew 丢弃的新消息
+        auto enqueued = false;
         {
             std::unique_lock lock(mutex_);
-            cv_space_.wait(lock,
-                           [this] { return worker_finished_ || queue_.size() < queue_capacity_; });
             if (worker_finished_) {
                 return;
             }
-            queue_.emplace_back(std::move(message));
+            switch (overflow_policy_) {
+                case OverflowPolicy::Block:
+                    cv_space_.wait(lock, [this] {
+                        return worker_finished_ || message_count_ < queue_capacity_;
+                    });
+                    if (worker_finished_) {
+                        return;
+                    }
+                    enqueue(std::move(message));
+                    enqueued = true;
+                    break;
+                case OverflowPolicy::OverrunOldest:
+                    if (message_count_ >= queue_capacity_) {
+                        overrun = drop_oldest_message_locked();
+                    }
+                    enqueue(std::move(message));
+                    enqueued = true;
+                    break;
+                case OverflowPolicy::DiscardNew:
+                    if (message_count_ >= queue_capacity_) {
+                        discarded = true;
+                    } else {
+                        enqueue(std::move(message));
+                        enqueued = true;
+                    }
+                    break;
+            }
         }
-        cv_ready_.notify_one();
+        if (enqueued) {
+            cv_ready_.notify_one();
+        }
+        if (!overrun.empty()) {
+            report(std::format("溢出：覆盖最旧消息 {}（策略 overrun_oldest）", overrun));
+        }
+        if (discarded) {
+            report(std::format("溢出：丢弃新消息 {}（策略 discard_new）", message.formatted()));
+        }
     }
 
     // 各级别便捷方法。第一个参数 {} 自动捕获调用点。
@@ -175,9 +213,35 @@ private:
         }
         switch (overflow_policy_) {
             case OverflowPolicy::Block:
+            case OverflowPolicy::OverrunOldest:
+            case OverflowPolicy::DiscardNew:
                 break;
             default:
                 ylog_detail_errors::fail_config<std::invalid_argument>("未知的 overflow_policy");
+        }
+    }
+
+    auto enqueue(Message message) -> void {
+        queue_.emplace_back(std::move(message));
+        ++message_count_;
+    }
+
+    // 调用方必须持有 mutex_。控制消息不是候选，跳过它们只删最旧的 Message。
+    auto drop_oldest_message_locked() -> std::string {
+        for (auto it = queue_.begin(); it != queue_.end(); ++it) {
+            if (auto* dropped = std::get_if<Message>(&*it)) {
+                auto text = std::string(dropped->formatted());
+                queue_.erase(it);
+                --message_count_;
+                return text;
+            }
+        }
+        return {};
+    }
+
+    auto report(std::string text) -> void {
+        if (err_handler_) {
+            ylog_detail_errors::safe_err_handler(err_handler_, text);
         }
     }
 
@@ -192,6 +256,9 @@ private:
                     return;
                 }
                 continue;
+            }
+            if (std::holds_alternative<Message>(queue_.front())) {
+                --message_count_;
             }
             auto item = std::move(queue_.front());
             queue_.pop_front();
@@ -222,6 +289,7 @@ private:
     std::condition_variable_any cv_ready_;
     std::condition_variable_any cv_space_;
     std::deque<QueueItem> queue_;
+    std::size_t message_count_{0};
     bool worker_finished_{false};
     std::jthread worker_;
 };
