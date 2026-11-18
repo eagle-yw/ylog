@@ -22,6 +22,13 @@ spec 只承认三类触发点：① 非阻塞策略的每次丢弃/覆盖；② 
 - **② 每次都报，不做「只报一次」去重。** User Story 8 是「every drop/overrun reported, so that loss is never silent」；早先的 `report_stopped_once` 让停止后的第二条起彻底静默。输出量交给默认 handler 的每秒限频控制，而不是在组件里静默丢弃通知。
 - **③ 的「每 sink 一次」按「连续失败」实现。** 一个 sink 处在失败状态时只上报一次，它下一次写成功即复位，再次失败会重新上报。作用域是组件生命周期内的一段失败区间，不是整个进程；这样持续故障不会按消息条数刷屏，恢复后复发仍然可见。flush 失败不参与这次去重——它只由显式 flush 触发，频率由调用方控制。
 
+## 追加：err_handler 的重入边界与 sink 配置期
+
+handler 总是在某个线程上同步调用：丢弃/停止上报发生在调用线程（锁外），sink 写入与 flush 失败发生在工作线程。由此得到两条调用方契约。
+
+- **工作线程上的 handler 不得重入本组件的 `log()` / `flush()` / `stop()`。** Block 策略下队列满时 `log()` 要等 worker 腾出空位，而 worker 正卡在 handler 里；`flush()` 要等 worker 推进序号，等的是同一个自己。两条都是自死锁。默认 handler 只写 stderr，不会触发；自定义 handler 若需要重入，得自己转投到别的队列或线程。spec 只规定了「handler 抛出的异常被吞掉」，重入不在支持范围内，也不打算用可重入锁去兼容它。
+- **`append_sink` / `set_pattern` 只在配置期合法。** worker 在构造末尾就已启动，之后改 sink 集合会与它的遍历竞争：`SinkSet` 的槽位既没有锁，也不能容忍中途扩容。首个入队与 `stop()` 之后，两个入口触发 `assert`；断言只抓得住单线程误用（先 log 再 append），真正的并发修改仍是数据竞争，接口不为此加锁——加锁只能让竞争变得安静，不能消除「worker 正持着迭代器、调用方 push_back」这个窗口。若将来需要运行期热插拔 sink，正确方向是让 worker 独占 sink 集合、把配置变更作为队列命令投递给 worker。
+
 ## Considered Options
 
 - 实现 `Sink` concept 的队列装饰器：改动最小，但 `AnySink` 在调用线程已完成格式化，Message 元数据在到达异步层前被消费，下游无法按级别或源位置决策。
