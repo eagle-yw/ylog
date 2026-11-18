@@ -50,6 +50,25 @@ export auto make_default_err_handler() -> std::function<void(std::string_view)> 
     };
 }
 
+// 热路径失败的上报锁存：连续失败只上报一次，成功之后由调用方复位。
+// 与默认 handler 的限频是两件事：前者压住同一次故障的重复上报，后者压住频率。
+export class failure_latch {
+public:
+    // 进入失败状态时返回 true，此后持续失败返回 false。
+    auto enter_failure() -> bool {
+        if (reported_) {
+            return false;
+        }
+        reported_ = true;
+        return true;
+    }
+
+    auto reset() -> void { reported_ = false; }
+
+private:
+    bool reported_{false};
+};
+
 export template <bool Enabled = exceptions_enabled, class F>
 auto safe_err_handler(F&& handler, std::string_view message) -> void {
     if constexpr (Enabled) {

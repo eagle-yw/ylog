@@ -70,7 +70,7 @@ public:
     auto flush() -> void {
         stream_.flush();
         if (stream_) {
-            reported_ = false;
+            latch_.reset();
             return;
         }
         report_("flush");
@@ -81,10 +81,9 @@ private:
     // 让后续写入仍有机会恢复，而不是让 sink 永久死掉。
     auto report_(std::string_view operation) -> void {
         stream_.clear();
-        if (reported_) {
+        if (!latch_.enter_failure()) {
             return;
         }
-        reported_ = true;
         ylog_detail_errors::safe_err_handler(
             config_.err_handler,
             std::format("file sink {} failed for '{}'", operation, config_.filename));
@@ -92,7 +91,7 @@ private:
 
     FileConfig config_;
     std::ofstream stream_;
-    bool reported_{false};
+    ylog_detail_errors::failure_latch latch_;
 };
 
 }  // namespace ylog

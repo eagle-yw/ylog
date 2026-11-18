@@ -24,4 +24,5 @@ stdout 颜色不是「另一种 sink」，而是同一个 sink 的一种模式�
 - `CallbackSink` 回调收到的是格式化后的行（`std::string_view`），不是 spdlog 的 `log_msg`；级别、logger 名需由 pattern 自带。
 - `RingBufferSink` 不提供 `last_formatted()` 方法于 sink 上，改由 `RingBufferStore` 读取；容量在 store 构造期固定。
 - 颜色只覆盖 `%^`/`%$` 区间与 `%+` 已标记的区间；无区间不着色，与 spdlog color sink 一致，但 Ylog 不做 Windows 控制台 API 检测，`Automatic` 仅判 `isatty`。
+- `Automatic` 在配置期按输出是否连着终端定型为 `Never` / `Always`，`color_mode()` 返回的是定型结果而不是 `Automatic`：热路径因此只读一个枚举，不必每条日志调用 `isatty`。定型发生在构造之后不再跟随重定向变化。
 - 不提供 `flush_every` / periodic worker、全局 error handler、`hourly_file_sink`、`dup_filter` / `dist` / `msvc` / `syslog` / `android` / `osx` sink。

@@ -65,7 +65,7 @@ public:
     auto flush() -> void {
         config_.stream->flush();
         if (!config_.stream->bad()) {
-            reported_ = false;
+            latch_.reset();
             return;
         }
         report_("flush");
@@ -78,17 +78,16 @@ private:
     // 让后续写入仍有机会恢复，而不是让 sink 永久死掉。
     auto report_(std::string_view operation) -> void {
         config_.stream->clear();
-        if (reported_) {
+        if (!latch_.enter_failure()) {
             return;
         }
-        reported_ = true;
         ylog_detail_errors::safe_err_handler(config_.err_handler,
-                                             std::format("ostream sink {} failed", operation));
+                                             std::format("ostream {} failed", operation));
     }
 
     OstreamConfig config_;
     ColorMode color_{ColorMode::Never};
-    bool reported_{false};
+    ylog_detail_errors::failure_latch latch_;
 };
 
 }  // namespace ylog

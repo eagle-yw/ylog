@@ -75,6 +75,10 @@ auto universal_sinks_behave() -> void {
     null_output.write(ylog::Message(ylog::Level::Info, "n", {}, "dropped"));
     null_output.flush();
 
+    // Automatic 在配置期定型，因此这里能读到确定的两态之一。
+    check(ylog::StdoutSink{}.color_mode() != ylog::ColorMode::Automatic,
+          "stdout sink resolves Automatic at configuration");
+
     if (!std::filesystem::exists("/dev/full")) {
         std::println("skip: /dev/full unavailable");
         return;
@@ -278,6 +282,22 @@ auto main() -> int {
         sink.flush();
     }
     check(read_all(path) == "file\n", "file sink writes");
+
+    // FileConfig 路径：默认追加，truncate_on_open 时清空。
+    {
+        auto sink = ylog::FileSink(ylog::FileConfig{.filename = path.string()});
+        sink.write("appended\n");
+        sink.flush();
+    }
+    check(read_all(path) == "file\nappended\n", "file sink appends by default");
+
+    {
+        auto sink =
+            ylog::FileSink(ylog::FileConfig{.filename = path.string(), .truncate_on_open = true});
+        sink.write("truncated\n");
+        sink.flush();
+    }
+    check(read_all(path) == "truncated\n", "file sink truncates on request");
 
     auto rotating_config = ylog::RotatingFileConfig{};
     rotating_config.filename = (directory / "rotating.log").string();
