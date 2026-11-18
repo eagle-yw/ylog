@@ -32,30 +32,37 @@ jobs:
   # 暂时只跑 GCC：Clang 的 C++26 模块/std 支持仍在追平，等其能过完整构建再回到矩阵。
   # 矩阵覆盖产物开关 YLOG_NO_EXCEPTIONS 的两侧；OFF 的构建内部还会用
   # YLOG_BUILD_NOEXC_TESTS 额外编一份无异常库，单次 ctest 同时跑两种模式。
+  #
+  # 基础镜像是 Arch 而不是 ubuntu-24.04：Ubuntu 的 toolchain PPA 只提供 gcc-16 的
+  # 16.0.1 快照，它读取聚合模块（`export module ylog;`）的 BMI 时报
+  # "failed to read compiled module: Bad file data"，所有 import ylog 的 TU 全部失败；
+  # 16.2 起才正常。Arch 提供 GCC 16.2.x，与本仓库本地开发环境一致。
   build-and-test:
-    name: build & test (g++-16, YLOG_NO_EXCEPTIONS=${{ matrix.no_exceptions }})
+    name: build & test (gcc 16.2, YLOG_NO_EXCEPTIONS=${{ matrix.no_exceptions }})
     runs-on: ubuntu-24.04
+    container: archlinux:latest
     strategy:
       fail-fast: false
       matrix:
         no_exceptions: [OFF, ON]
     steps:
-      - uses: actions/checkout@v4
+      # 容器里先装 git 才能 checkout；Arch 无 sudo，直接以 root 跑 pacman。
       - name: Install toolchain
         run: |
-          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          sudo apt-get update
-          sudo apt-get install -y g++-16 ninja-build
+          pacman -Syu --noconfirm --quiet --needed archlinux-keyring
+          pacman -S --noconfirm --quiet --needed gcc ninja curl ca-certificates git
+          g++ --version | head -1
+      - uses: actions/checkout@v4
       - name: Install CMake ${{ env.CMAKE_VERSION }}
         run: |
           curl -fsSL -o /tmp/cmake.tar.gz \
             "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
-          sudo tar -xzf /tmp/cmake.tar.gz -C /opt
+          tar -xzf /tmp/cmake.tar.gz -C /opt
           echo "/opt/cmake-${CMAKE_VERSION}-linux-x86_64/bin" >> "$GITHUB_PATH"
       - name: Configure
         run: |
           cmake --version
-          cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-16 -DYLOG_NO_EXCEPTIONS=${{ matrix.no_exceptions }} -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wconversion -pedantic -Werror"
+          cmake -S . -B build -G Ninja -DYLOG_NO_EXCEPTIONS=${{ matrix.no_exceptions }} -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wconversion -pedantic -Werror"
       - name: Build
         run: cmake --build build
       - name: Test
