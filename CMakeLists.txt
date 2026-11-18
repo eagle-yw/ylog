@@ -20,6 +20,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-Wno-deprecated-declarations)
 endif()
 
+# 无异常变体：同一份模块源码以 -fno-exceptions + YLOG_NO_EXCEPTIONS 再编一遍，
+# 作为独立 ctest target 验证「关闭异常后不静默失败」的约定。
+option(YLOG_BUILD_NOEXC_TESTS "构建无异常（-fno-exceptions）变体的测试目标" ON)
+
 add_subdirectory(src)
 add_subdirectory(test)
 add_subdirectory(example)

@@ -46,3 +46,13 @@ target_include_directories(pattern_oracle_test SYSTEM PRIVATE
 )
 
 add_test(NAME pattern_oracle_test COMMAND pattern_oracle_test)
+
+# 无异常变体的独立 ctest target：用 gtest 会引入 GTEST_HAS_EXCEPTIONS 口径不一致，
+# 因此这里是一个自检程序（退出码即结果）。
+if(TARGET ylog_noexc)
+    add_executable(noexc_test noexc_test.cpp)
+
+    target_link_libraries(noexc_test PRIVATE ylog_noexc)
+
+    add_test(NAME noexc COMMAND noexc_test)
+endif()
