@@ -102,6 +102,13 @@ struct color_range {
     std::size_t end{0};
 };
 
+// 一次 format 调用期间的可变状态：本次的本地时间与被标出的颜色区间。
+// 它随调用产生，不属于编译结果——编译只产出操作列表与时间依赖。
+struct render_context {
+    std::tm time{};
+    color_range color{};
+};
+
 // RAII：析构时补齐空格或截断，规则与 spdlog 的 scoped_padder 一致。
 class scoped_padder {
 public:
@@ -165,13 +172,13 @@ public:
           fixed_size_(fixed_size) {}
     virtual ~flag_formatter() = default;
 
-    auto format(const Message& message, const std::tm& time, std::string& dest) const -> void {
+    auto format(const Message& message, render_context& ctx, std::string& dest) const -> void {
         scoped_padder pad(dest, info_, fixed_size_);
-        format_value(message, time, dest);
+        format_value(message, ctx, dest);
     }
 
 private:
-    virtual auto format_value(const Message&, const std::tm&, std::string&) const -> void = 0;
+    virtual auto format_value(const Message&, render_context&, std::string&) const -> void = 0;
 
     padding_info info_;
     std::size_t fixed_size_;
@@ -184,7 +191,7 @@ public:
         : text_(std::move(text)) {}
 
 private:
-    auto format_value(const Message&, const std::tm&, std::string& dest) const -> void override {
+    auto format_value(const Message&, render_context&, std::string& dest) const -> void override {
         dest.append(text_);
     }
     std::string text_;
@@ -196,7 +203,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         dest.append(msg.formatted());
     }
@@ -208,7 +215,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         dest.append(msg.logger_name());
     }
@@ -220,7 +227,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         dest.append(level_name(msg.level()));
     }
@@ -232,7 +239,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         auto name = level_name(msg.level());
         if (!name.empty()) {
@@ -247,7 +254,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         append_int(dest, msg.thread_id());
     }
@@ -259,7 +266,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message&, const std::tm&, std::string& dest) const -> void override {
+    auto format_value(const Message&, render_context&, std::string& dest) const -> void override {
         append_int(dest, ylog_detail_os::process_id());
     }
 };
@@ -298,9 +305,9 @@ public:
           get_value_(get_value) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        dest.append(get_value_(time));
+        dest.append(get_value_(ctx.time));
     }
     getter get_value_;
 };
@@ -316,13 +323,13 @@ public:
           zero_width_(zero_width) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
         if (zero_width_ == 0) {
-            append_int(dest, getter_(time));
+            append_int(dest, getter_(ctx.time));
             return;
         }
-        append_zero_padded(dest, getter_(time), zero_width_);
+        append_zero_padded(dest, getter_(ctx.time), zero_width_);
     }
     field_getter getter_;
     int zero_width_;
@@ -343,21 +350,21 @@ public:
         : flag_formatter(info, 24) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        dest.append(short_weekday(time));
+        dest.append(short_weekday(ctx.time));
         dest.push_back(' ');
-        dest.append(short_month(time));
+        dest.append(short_month(ctx.time));
         dest.push_back(' ');
-        append_int(dest, time.tm_mday);
+        append_int(dest, ctx.time.tm_mday);
         dest.push_back(' ');
-        append_zero_padded(dest, time.tm_hour, 2);
+        append_zero_padded(dest, ctx.time.tm_hour, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_min, 2);
+        append_zero_padded(dest, ctx.time.tm_min, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_sec, 2);
+        append_zero_padded(dest, ctx.time.tm_sec, 2);
         dest.push_back(' ');
-        append_int(dest, time.tm_year + 1900);
+        append_int(dest, ctx.time.tm_year + 1900);
     }
 };
 
@@ -368,13 +375,13 @@ public:
         : flag_formatter(info, 8) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        append_zero_padded(dest, time.tm_mon + 1, 2);
+        append_zero_padded(dest, ctx.time.tm_mon + 1, 2);
         dest.push_back('/');
-        append_zero_padded(dest, time.tm_mday, 2);
+        append_zero_padded(dest, ctx.time.tm_mday, 2);
         dest.push_back('/');
-        append_zero_padded(dest, time.tm_year % 100, 2);
+        append_zero_padded(dest, ctx.time.tm_year % 100, 2);
     }
 };
 
@@ -385,9 +392,9 @@ public:
         : flag_formatter(info, 2) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        dest.append(ampm(time));
+        dest.append(ampm(ctx.time));
     }
 };
 
@@ -398,15 +405,15 @@ public:
         : flag_formatter(info, 11) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        append_zero_padded(dest, to12h(time), 2);
+        append_zero_padded(dest, to12h(ctx.time), 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_min, 2);
+        append_zero_padded(dest, ctx.time.tm_min, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_sec, 2);
+        append_zero_padded(dest, ctx.time.tm_sec, 2);
         dest.push_back(' ');
-        dest.append(ampm(time));
+        dest.append(ampm(ctx.time));
     }
 };
 
@@ -417,11 +424,11 @@ public:
         : flag_formatter(info, 5) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        append_zero_padded(dest, time.tm_hour, 2);
+        append_zero_padded(dest, ctx.time.tm_hour, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_min, 2);
+        append_zero_padded(dest, ctx.time.tm_min, 2);
     }
 };
 
@@ -432,13 +439,13 @@ public:
         : flag_formatter(info, 8) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        append_zero_padded(dest, time.tm_hour, 2);
+        append_zero_padded(dest, ctx.time.tm_hour, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_min, 2);
+        append_zero_padded(dest, ctx.time.tm_min, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_sec, 2);
+        append_zero_padded(dest, ctx.time.tm_sec, 2);
     }
 };
 
@@ -449,9 +456,9 @@ public:
         : flag_formatter(info, 6) {}
 
 private:
-    auto format_value(const Message&, const std::tm& time, std::string& dest) const
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
         -> void override {
-        auto total_minutes = ylog_detail_os::utc_offset_minutes(time);
+        auto total_minutes = ylog_detail_os::utc_offset_minutes(ctx.time);
         auto negative = total_minutes < 0;
         if (negative) {
             total_minutes = -total_minutes;
@@ -476,7 +483,7 @@ public:
     }
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         append_zero_padded(dest, nanosecond_fraction(msg) / divisor_, width_);
     }
@@ -491,7 +498,7 @@ public:
         : flag_formatter(info, 10) {}
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         auto seconds =
             std::chrono::duration_cast<std::chrono::seconds>(msg.timestamp().time_since_epoch());
@@ -505,7 +512,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         if (source_empty(msg)) {
             return;
@@ -522,7 +529,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         if (source_empty(msg)) {
             return;
@@ -537,7 +544,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         if (source_empty(msg)) {
             return;
@@ -552,7 +559,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         if (source_empty(msg)) {
             return;
@@ -567,7 +574,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         if (source_empty(msg)) {
             return;
@@ -577,28 +584,27 @@ private:
 };
 
 // `%^`/`%$`：只记录色彩区间，不写转义序列（与 spdlog 一致）。
+// 区间写在本次调用的渲染上下文里，操作对象不再持有 Formatter 成员的指针。
 class color_start_formatter final : public flag_formatter {
 public:
-    explicit color_start_formatter(color_range& color)
-        : color_(&color) {}
+    using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message&, const std::tm&, std::string& dest) const -> void override {
-        color_->start = dest.size();
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
+        -> void override {
+        ctx.color.start = dest.size();
     }
-    color_range* color_;
 };
 
 class color_stop_formatter final : public flag_formatter {
 public:
-    explicit color_stop_formatter(color_range& color)
-        : color_(&color) {}
+    using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message&, const std::tm&, std::string& dest) const -> void override {
-        color_->end = dest.size();
+    auto format_value(const Message&, render_context& ctx, std::string& dest) const
+        -> void override {
+        ctx.color.end = dest.size();
     }
-    color_range* color_;
 };
 
 // `%u`/`%i`/`%o`/`%O`：距上一条消息的纳秒/微秒/毫秒/秒数。
@@ -611,7 +617,7 @@ public:
           last_message_time_(std::chrono::system_clock::now()) {}
 
 private:
-    auto format_value(const Message& msg, const std::tm&, std::string& dest) const
+    auto format_value(const Message& msg, render_context&, std::string& dest) const
         -> void override {
         auto delta = std::max(msg.timestamp() - last_message_time_,
                               std::chrono::system_clock::duration::zero());
@@ -628,7 +634,7 @@ public:
     using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message&, const std::tm&, std::string&) const -> void override {}
+    auto format_value(const Message&, render_context&, std::string&) const -> void override {}
 };
 
 // `%+`：默认完整格式，等价于
@@ -636,24 +642,23 @@ private:
 // 与 spdlog 一致，`%+` 忽略 padding。
 class full_formatter final : public flag_formatter {
 public:
-    explicit full_formatter(color_range& color)
-        : color_(&color) {}
+    using flag_formatter::flag_formatter;
 
 private:
-    auto format_value(const Message& msg, const std::tm& time, std::string& dest) const
+    auto format_value(const Message& msg, render_context& ctx, std::string& dest) const
         -> void override {
         dest.push_back('[');
-        append_zero_padded(dest, time.tm_year + 1900, 4);
+        append_zero_padded(dest, ctx.time.tm_year + 1900, 4);
         dest.push_back('-');
-        append_zero_padded(dest, time.tm_mon + 1, 2);
+        append_zero_padded(dest, ctx.time.tm_mon + 1, 2);
         dest.push_back('-');
-        append_zero_padded(dest, time.tm_mday, 2);
+        append_zero_padded(dest, ctx.time.tm_mday, 2);
         dest.push_back(' ');
-        append_zero_padded(dest, time.tm_hour, 2);
+        append_zero_padded(dest, ctx.time.tm_hour, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_min, 2);
+        append_zero_padded(dest, ctx.time.tm_min, 2);
         dest.push_back(':');
-        append_zero_padded(dest, time.tm_sec, 2);
+        append_zero_padded(dest, ctx.time.tm_sec, 2);
         dest.push_back('.');
         append_zero_padded(dest, nanosecond_fraction(msg) / 1'000'000, 3);
         dest.append("] ");
@@ -665,9 +670,9 @@ private:
         }
 
         dest.push_back('[');
-        color_->start = dest.size();
+        ctx.color.start = dest.size();
         dest.append(level_name(msg.level()));
-        color_->end = dest.size();
+        ctx.color.end = dest.size();
         dest.append("] ");
 
         if (!source_empty(msg)) {
@@ -679,7 +684,6 @@ private:
         }
         dest.append(msg.formatted());
     }
-    color_range* color_;
 };
 
 // 字段取值函数（供 int_time_formatter 使用）。
@@ -726,134 +730,120 @@ inline auto parse_padding(std::string_view pattern, std::size_t& index) -> paddi
     return padding_info{width, align, truncate, true};
 }
 
-// 将单个 flag 编译为 formatter。need_localtime 标记是否用到时间字段。
-inline auto make_flag(char flag, padding_info info, bool& need_localtime, color_range& color)
-    -> std::unique_ptr<flag_formatter> {
+// 单个 flag 的编译产物：操作对象，以及该 flag 是否依赖本地时间。
+struct compiled_flag {
+    std::unique_ptr<flag_formatter> formatter;
+    bool needs_localtime{false};
+};
+
+// 将单个 flag 编译为操作对象。时间依赖与操作对象一起返回，
+// 因此编译不再改写调用方的任何状态。
+inline auto make_flag(char flag, padding_info info) -> compiled_flag {
     switch (flag) {
         case 'v':
-            return std::make_unique<payload_formatter>(info);
+            return {std::make_unique<payload_formatter>(info)};
         case 'n':
-            return std::make_unique<name_formatter>(info);
+            return {std::make_unique<name_formatter>(info)};
         case 'l':
-            return std::make_unique<level_formatter>(info);
+            return {std::make_unique<level_formatter>(info)};
         case 'L':
-            return std::make_unique<short_level_formatter>(info);
+            return {std::make_unique<short_level_formatter>(info)};
         case 't':
-            return std::make_unique<thread_id_formatter>(info);
+            return {std::make_unique<thread_id_formatter>(info)};
         case 'P':
-            return std::make_unique<pid_formatter>(info);
+            return {std::make_unique<pid_formatter>(info)};
 
         case '+':
             // spdlog 的 full_formatter 不使用 padding。
-            need_localtime = true;
-            return std::make_unique<full_formatter>(color);
+            return {std::make_unique<full_formatter>(), true};
 
         case 'a':
-            need_localtime = true;
-            return std::make_unique<name_list_formatter>(short_weekday, info);
+            return {std::make_unique<name_list_formatter>(short_weekday, info), true};
         case 'A':
-            need_localtime = true;
-            return std::make_unique<name_list_formatter>(long_weekday, info);
+            return {std::make_unique<name_list_formatter>(long_weekday, info), true};
         case 'b':
         case 'h':
-            need_localtime = true;
-            return std::make_unique<name_list_formatter>(short_month, info);
+            return {std::make_unique<name_list_formatter>(short_month, info), true};
         case 'B':
-            need_localtime = true;
-            return std::make_unique<name_list_formatter>(long_month, info);
+            return {std::make_unique<name_list_formatter>(long_month, info), true};
         case 'c':
-            need_localtime = true;
-            return std::make_unique<c_formatter>(info);
+            return {std::make_unique<c_formatter>(info), true};
         case 'C':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_short_year, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_short_year, 2, info), true};
         case 'y':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_short_year, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_short_year, 2, info), true};
         case 'Y':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_year, 0, info);
+            return {std::make_unique<int_time_formatter>(tm_year, 0, info), true};
         case 'D':
         case 'x':
-            need_localtime = true;
-            return std::make_unique<date_formatter>(info);
+            return {std::make_unique<date_formatter>(info), true};
         case 'm':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_month, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_month, 2, info), true};
         case 'd':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_day, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_day, 2, info), true};
         case 'H':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_hour, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_hour, 2, info), true};
         case 'I':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(
-                [](const std::tm& time) { return to12h(time); }, 2, info);
+            return {std::make_unique<int_time_formatter>(
+                        [](const std::tm& time) { return to12h(time); }, 2, info),
+                    true};
         case 'M':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_minute, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_minute, 2, info), true};
         case 'S':
-            need_localtime = true;
-            return std::make_unique<int_time_formatter>(tm_second, 2, info);
+            return {std::make_unique<int_time_formatter>(tm_second, 2, info), true};
         case 'p':
-            need_localtime = true;
-            return std::make_unique<ampm_formatter>(info);
+            return {std::make_unique<ampm_formatter>(info), true};
         case 'r':
-            need_localtime = true;
-            return std::make_unique<clock12_formatter>(info);
+            return {std::make_unique<clock12_formatter>(info), true};
         case 'R':
-            need_localtime = true;
-            return std::make_unique<clock_hm_formatter>(info);
+            return {std::make_unique<clock_hm_formatter>(info), true};
         case 'T':
         case 'X':
-            need_localtime = true;
-            return std::make_unique<clock_hms_formatter>(info);
+            return {std::make_unique<clock_hms_formatter>(info), true};
         case 'z':
-            need_localtime = true;
-            return std::make_unique<timezone_formatter>(info);
+            return {std::make_unique<timezone_formatter>(info), true};
 
         case 'e':
-            return std::make_unique<fraction_formatter>(3, info);
+            return {std::make_unique<fraction_formatter>(3, info)};
         case 'f':
-            return std::make_unique<fraction_formatter>(6, info);
+            return {std::make_unique<fraction_formatter>(6, info)};
         case 'F':
-            return std::make_unique<fraction_formatter>(9, info);
+            return {std::make_unique<fraction_formatter>(9, info)};
         case 'E':
-            return std::make_unique<epoch_formatter>(info);
+            return {std::make_unique<epoch_formatter>(info)};
 
         case '@':
-            return std::make_unique<source_location_formatter>(info);
+            return {std::make_unique<source_location_formatter>(info)};
         case 'g':
-            return std::make_unique<source_filename_formatter>(info);
+            return {std::make_unique<source_filename_formatter>(info)};
         case 's':
-            return std::make_unique<short_filename_formatter>(info);
+            return {std::make_unique<short_filename_formatter>(info)};
         case '#':
-            return std::make_unique<source_line_formatter>(info);
+            return {std::make_unique<source_line_formatter>(info)};
         case '!':
-            return std::make_unique<source_function_formatter>(info);
+            return {std::make_unique<source_function_formatter>(info)};
 
         case '^':
-            return std::make_unique<color_start_formatter>(color);
+            return {std::make_unique<color_start_formatter>()};
         case '$':
-            return std::make_unique<color_stop_formatter>(color);
+            return {std::make_unique<color_stop_formatter>()};
 
         case 'u':
-            return std::make_unique<elapsed_formatter<std::chrono::nanoseconds>>(info);
+            return {std::make_unique<elapsed_formatter<std::chrono::nanoseconds>>(info)};
         case 'i':
-            return std::make_unique<elapsed_formatter<std::chrono::microseconds>>(info);
+            return {std::make_unique<elapsed_formatter<std::chrono::microseconds>>(info)};
         case 'o':
-            return std::make_unique<elapsed_formatter<std::chrono::milliseconds>>(info);
+            return {std::make_unique<elapsed_formatter<std::chrono::milliseconds>>(info)};
         case 'O':
-            return std::make_unique<elapsed_formatter<std::chrono::seconds>>(info);
+            return {std::make_unique<elapsed_formatter<std::chrono::seconds>>(info)};
 
         case '&':
-            return std::make_unique<mdc_formatter>(info);
+            return {std::make_unique<mdc_formatter>(info)};
 
         case '%':
-            return std::make_unique<literal_formatter>("%");
+            return {std::make_unique<literal_formatter>("%")};
         default:
-            return std::make_unique<literal_formatter>(std::string("%") + flag);
+            return {std::make_unique<literal_formatter>(std::string("%") + flag)};
     }
 }
 
@@ -873,9 +863,9 @@ public:
           handler_(std::move(handler)) {}
 
 private:
-    auto format_value(const Message& message, const std::tm& time, std::string& dest) const
+    auto format_value(const Message& message, render_context& ctx, std::string& dest) const
         -> void override {
-        handler_.format(message, time, dest);
+        handler_.format(message, ctx.time, dest);
     }
     mutable T handler_;
 };
@@ -898,6 +888,54 @@ private:
     T handler_;
 };
 
+// 编译结果：只包含操作列表与时间依赖，不含任何调用期状态。
+struct compiled_pattern {
+    std::vector<std::unique_ptr<flag_formatter>> formatters;
+    bool need_localtime{false};
+};
+
+// 从「pattern + 注册表」一次性产出编译结果：换 pattern、注册 flag 与 clone 都只替换它。
+// 时间依赖规则不变：注册表非空即需要 localtime（自定义 handler 总收 std::tm），
+// 任一内置时间 flag 也置位。
+inline auto compile_pattern(
+    std::string_view pattern,
+    const std::unordered_map<char, std::unique_ptr<custom_flag_holder>>& custom_flags)
+    -> compiled_pattern {
+    auto result = compiled_pattern{};
+    result.need_localtime = !custom_flags.empty();
+    std::string literal;
+    auto flush_literal = [&] {
+        if (!literal.empty()) {
+            result.formatters.push_back(std::make_unique<literal_formatter>(literal));
+            literal.clear();
+        }
+    };
+
+    std::size_t index = 0;
+    while (index < pattern.size()) {
+        if (pattern[index] != '%') {
+            literal.push_back(pattern[index++]);
+            continue;
+        }
+        flush_literal();
+        ++index;  // 跳过 '%'
+        auto info = parse_padding(pattern, index);
+        if (index >= pattern.size()) {
+            break;  // 末尾单独的 '%' 被丢弃，与 spdlog 一致
+        }
+        auto flag = pattern[index++];
+        if (auto custom = custom_flags.find(flag); custom != custom_flags.end()) {
+            result.formatters.push_back(custom->second->make_formatter(info));
+            continue;
+        }
+        auto compiled = make_flag(flag, info);
+        result.need_localtime = result.need_localtime || compiled.needs_localtime;
+        result.formatters.push_back(std::move(compiled.formatter));
+    }
+    flush_literal();
+    return result;
+}
+
 }  // namespace detail
 
 // formatter 抽象基类：原型模式，每个 sink 持有独立 clone。
@@ -919,23 +957,24 @@ public:
 };
 
 // 可编译的 pattern formatter。
-// pattern 在 set_pattern 时编译为 flag formatter 列表；时间字段按秒缓存。
+// pattern 编译成一份「操作列表 + 时间依赖」；时间缓存与颜色区间属于调用期状态。
 export class PatternFormatter final : public Formatter {
 public:
     explicit PatternFormatter(std::string_view pattern = default_pattern) { set_pattern(pattern); }
 
     auto clone() const -> std::unique_ptr<Formatter> override {
-        auto result = std::make_unique<PatternFormatter>(pattern_);
+        // 先复制注册表，再用「pattern + 已复制的注册表」构造：只编译一次。
+        auto flags = std::unordered_map<char, std::unique_ptr<detail::custom_flag_holder>>{};
         for (const auto& [flag, holder] : custom_flags_) {
-            result->custom_flags_.emplace(flag, holder->clone());
+            flags.emplace(flag, holder->clone());
         }
-        result->recompile_();
-        return result;
+        return std::unique_ptr<Formatter>(new PatternFormatter(pattern_, std::move(flags)));
     }
 
     auto pattern() const -> std::string_view override { return pattern_; }
 
     // 最近一次 format 中 `%^`/`%$` 标出的区间；未出现时为 {0, 0}。
+    // 换 pattern 或注册 flag 不会清空它：它描述的是最近一次 format，不是编译结果。
     auto color_range() const -> std::pair<std::size_t, std::size_t> override {
         return {color_range_.start, color_range_.end};
     }
@@ -948,82 +987,65 @@ public:
         }
         custom_flags_.emplace(
             flag, std::make_unique<detail::custom_flag_holder_model<T>>(std::move(handler)));
-        recompile_();
+        if constexpr (ylog_detail_errors::exceptions_enabled) {
+            try {
+                recompile_();
+            } catch (...) {
+                // 编译成功才算注册完成：回滚，免得留下“已注册但未编译”的 flag。
+                custom_flags_.erase(flag);
+                throw;
+            }
+        } else {
+            recompile_();
+        }
     }
 
     auto set_pattern(std::string_view pattern) -> void override {
+        // 先编译再一起提交：编译失败时 pattern() 与输出仍描述同一个 pattern。
+        auto next = detail::compile_pattern(pattern, custom_flags_);
         pattern_ = pattern;
-        recompile_();
+        compiled_ = std::move(next);
     }
 
     auto format(const Message& message, std::string& dest) -> void override {
-        color_range_ = {};
-        if (need_localtime_) {
+        auto ctx = detail::render_context{};
+        if (compiled_.need_localtime) {
             auto secs = std::chrono::duration_cast<std::chrono::seconds>(
                 message.timestamp().time_since_epoch());
-            if (secs != last_log_secs_) {
+            if (!last_log_secs_ || secs != *last_log_secs_) {
                 cached_tm_ = detail::localtime_threadsafe(
                     std::chrono::system_clock::to_time_t(message.timestamp()));
                 last_log_secs_ = secs;
             }
+            ctx.time = cached_tm_;
         }
-        for (const auto& formatter : formatters_) {
-            formatter->format(message, cached_tm_, dest);
+        for (const auto& formatter : compiled_.formatters) {
+            formatter->format(message, ctx, dest);
         }
+        color_range_ = ctx.color;
         dest.append(eol_);
     }
 
 private:
-    auto recompile_() -> void {
-        formatters_.clear();
-        color_range_ = {};
-        need_localtime_ = !custom_flags_.empty();
-        compile_pattern_(pattern_);
-        last_log_secs_ = std::chrono::seconds{-1};
-    }
+    // clone 专用：注册表已复制好，构造时完成唯一一次编译。
+    PatternFormatter(std::string_view pattern,
+                     std::unordered_map<char, std::unique_ptr<detail::custom_flag_holder>> flags)
+        : pattern_(pattern),
+          compiled_(detail::compile_pattern(pattern, flags)),
+          custom_flags_(std::move(flags)) {}
 
-    auto compile_pattern_(std::string_view pattern) -> void {
-        std::string literal;
-        auto flush_literal = [&] {
-            if (!literal.empty()) {
-                formatters_.push_back(std::make_unique<detail::literal_formatter>(literal));
-                literal.clear();
-            }
-        };
-
-        std::size_t index = 0;
-        while (index < pattern.size()) {
-            if (pattern[index] != '%') {
-                literal.push_back(pattern[index++]);
-                continue;
-            }
-            flush_literal();
-            ++index;  // 跳过 '%'
-            auto info = detail::parse_padding(pattern, index);
-            if (index >= pattern.size()) {
-                break;  // 末尾单独的 '%' 被丢弃，与 spdlog 一致
-            }
-            auto flag = pattern[index++];
-            if (auto custom = custom_flags_.find(flag); custom != custom_flags_.end()) {
-                formatters_.push_back(custom->second->make_formatter(info));
-            } else {
-                formatters_.push_back(detail::make_flag(flag, info, need_localtime_, color_range_));
-            }
-        }
-        flush_literal();
-    }
+    // 唯一的重编译入口：整体替换编译结果，不触碰颜色区间与时间缓存。
+    auto recompile_() -> void { compiled_ = detail::compile_pattern(pattern_, custom_flags_); }
 
     std::string pattern_{default_pattern};
-    std::string eol_{"\n"};
-    std::vector<std::unique_ptr<detail::flag_formatter>> formatters_;
+    std::string eol_{"\n"};  // 当前不可配置；clone 不复制它是有意的
+    detail::compiled_pattern compiled_;
     std::unordered_map<char, std::unique_ptr<detail::custom_flag_holder>> custom_flags_;
-    bool need_localtime_{false};
 
-    // 按秒缓存的 localtime 结果，避免每条日志都调用 localtime。
-    std::chrono::seconds last_log_secs_{-1};
+    // 调用期状态：按秒缓存的 localtime 结果，避免每条日志都调用 localtime。
+    std::optional<std::chrono::seconds> last_log_secs_;  // 空表示尚未计算
     std::tm cached_tm_{};
-
-    // `%^`/`%$` 记录的区间，随每次 format 重置。
+    // 最近一次 format 的 `%^`/`%$` 区间，来自该次调用的渲染上下文。
     detail::color_range color_range_{};
 };
 
