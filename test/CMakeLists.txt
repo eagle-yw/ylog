@@ -6,6 +6,9 @@ if(YLOG_NO_EXCEPTIONS)
     target_link_libraries(noexc_test PRIVATE ylog)
 
     add_test(NAME noexc COMMAND noexc_test)
+
+    # 并发冒烟在 Block 策略下若唤醒丢失会挂住而不是失败，用超时兜底。
+    set_tests_properties(noexc PROPERTIES TIMEOUT 60)
     return()
 endif()
 
@@ -66,4 +69,7 @@ if(TARGET ylog_noexc)
     target_link_libraries(noexc_test PRIVATE ylog_noexc)
 
     add_test(NAME noexc COMMAND noexc_test)
+
+    # 并发冒烟在 Block 策略下若唤醒丢失会挂住而不是失败，用超时兜底。
+    set_tests_properties(noexc PROPERTIES TIMEOUT 60)
 endif()
