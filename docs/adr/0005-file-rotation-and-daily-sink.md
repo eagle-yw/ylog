@@ -18,3 +18,15 @@ Ylog 以两个独立 `Sink` 采纳 spdlog 的文件轮转能力：`RotatingFileS
 
 - 按日边界使用写入时系统时间，而不是 `Message` 的时间戳。
 - 不提供 hourly sink、strftime 样式日文件名、fsync、历史运行文件清理。
+
+## 追加：文件生命周期收进私有接缝
+
+`DailyFileSink` 与 `RotatingFileSink` 曾各自持有一份文件名拆分、父目录创建、流打开与热路径写/刷失败上报，两份只差上报前缀。这些现在集中在实现分区 `ylog:sink.file.lifecycle`（`module ylog:sink.file.lifecycle;`，不导出任何名字，同 `:async.queue` / `:logger.base`），两个 sink 经 `import :sink.file.lifecycle;` 使用：
+
+- 路径操作：`split_stem_and_extension`、`path_exists`、`file_size_or_zero`；
+- 流生命周期：`detail::file_stream`——配置期 `open`（失败交给各自的 `fail_*_config`，与校验失败共用类型前缀）、热路径 `reopen` / `write` / `flush`（失败上报并清流状态）、`close`，把「打开、写、刷、关、上报、清状态」收成一处；
+- 热路径上报文案的唯一出口 `report_io_failure`：流失败与 sink 自己的文件系统失败（删旧日文件、删最旧备份、改备份名）共用同一形状，sink 名作为参数传入。
+
+边界不变：轮转触发条件、文件命名（`_{YYYY-MM-DD}` 与 `.{i}`）、保留策略仍留在各自 sink。`err_handler` 按次取自 `config_.err_handler`，不能在构造期抓成员地址——两个 sink 都按值移动（`AnySink` 构造即如此），抓地址在移动后悬垂。`FileSink` 不创建父目录、有自己的 failure latch，不参与本次合并；公开接口零变化。
+
+合并保留了合并前的一条既有偏差：父目录建不出来时，配置期错误仍报成 `failed to open '<文件路径>'`，路径指文件而不是父目录。这不在本次集中化的范围内，改动它会变更公开的错误文案。

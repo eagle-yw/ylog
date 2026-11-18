@@ -135,7 +135,15 @@ TEST(RotatingFileSinkTest, ReportsOpenFailureAtConfiguration) {
 
     auto config = ylog::RotatingFileConfig{};
     config.filename = directory.string();
-    EXPECT_THROW({ auto sink = ylog::RotatingFileSink(config); }, std::invalid_argument);
+    try {
+        auto sink = ylog::RotatingFileSink(config);
+        FAIL() << "opening a directory should be rejected at configuration";
+    } catch (const std::invalid_argument& error) {
+        // 配置期失败与校验失败共用一个类型前缀；文案是公开契约的一部分。
+        auto expected = std::format("RotatingFileSink: failed to open '{}': ", directory.string());
+        EXPECT_NE(std::string_view(error.what()).find(expected), std::string_view::npos)
+            << error.what();
+    }
 
     std::filesystem::remove_all(directory);
 }

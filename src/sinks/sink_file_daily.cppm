@@ -2,11 +2,16 @@ export module ylog:sink.file.daily;
 
 import std;
 import :sink;
+import :sink.file.lifecycle;
 import ylog_detail_errors;
 
 namespace ylog {
 
 namespace detail {
+
+// 热路径上报文案里的 sink 名（如 "daily file sink write failed for ..."）。
+// 配置期前缀是另一套文本，由下面的 fail_daily_config 给出类型名 "DailyFileSink"。
+inline constexpr std::string_view daily_sink_name{"daily file sink"};
 
 inline auto fail_daily_config(std::string_view reason) -> void {
     ylog_detail_errors::fail_config(std::format("DailyFileSink: {}", reason));
@@ -20,49 +25,6 @@ inline auto daily_localtime(std::time_t seconds) -> std::tm {
         result = *value;
     }
     return result;
-}
-
-inline auto split_stem_and_extension(const std::string& filename)
-    -> std::pair<std::string, std::string> {
-    auto name = std::filesystem::path(filename).filename().string();
-    auto dot = name.find_last_of('.');
-    if (dot != std::string::npos && dot > 0 && dot + 1 < name.size()) {
-        return {name.substr(0, dot), name.substr(dot)};
-    }
-    return {name, {}};
-}
-
-inline auto path_exists(const std::filesystem::path& path) -> bool {
-    auto error = std::error_code{};
-    auto result = std::filesystem::exists(path, error);
-    return error ? false : result;
-}
-
-inline auto try_open_daily_stream(const std::filesystem::path& path,
-                                  bool truncate,
-                                  std::error_code& error) -> std::ofstream {
-    if (auto parent = path.parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent, error);
-        if (error) {
-            return {};
-        }
-    }
-    auto mode = std::ios::out | std::ios::binary | (truncate ? std::ios::trunc : std::ios::app);
-    auto stream = std::ofstream(path, mode);
-    if (!stream.is_open()) {
-        error = std::make_error_code(std::errc::io_error);
-        return {};
-    }
-    return stream;
-}
-
-inline auto open_daily_stream(const std::filesystem::path& path, bool truncate) -> std::ofstream {
-    auto error = std::error_code{};
-    auto stream = try_open_daily_stream(path, truncate, error);
-    if (error) {
-        fail_daily_config(std::format("failed to open '{}': {}", path.string(), error.message()));
-    }
-    return stream;
 }
 
 inline auto daily_path(const std::string& filename, std::chrono::system_clock::time_point now)
@@ -123,7 +85,10 @@ public:
           clock_(config_.clock),
           current_path_(detail::daily_path(config_.filename, clock_())),
           current_path_existed_(detail::path_exists(current_path_)),
-          stream_(detail::open_daily_stream(current_path_, config_.truncate_on_open)),
+          stream_(detail::file_stream::open(detail::daily_sink_name,
+                                            current_path_,
+                                            config_.truncate_on_open,
+                                            detail::fail_daily_config)),
           next_rotation_(detail::next_midnight(clock_())) {
         if (!current_path_existed_) {
             created_files_.push_back(current_path_);
@@ -141,34 +106,21 @@ public:
         if (now >= next_rotation_) {
             rotate_(now);
         }
-        stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
-        if (!stream_) {
-            report_failure_("write", current_path_, "stream error");
-            stream_.clear();
+        if (!stream_.write(line, config_.err_handler)) {
             return;
         }
         apply_retention_();
     }
 
-    auto flush() -> void {
-        stream_.flush();
-        if (!stream_) {
-            report_failure_("flush", current_path_, "stream error");
-            stream_.clear();
-        }
-    }
+    auto flush() -> void { stream_.flush(config_.err_handler); }
 
 private:
     auto rotate_(std::chrono::system_clock::time_point now) -> void {
         stream_.close();
         current_path_ = detail::daily_path(config_.filename, now);
         current_path_existed_ = detail::path_exists(current_path_);
-        auto error = std::error_code{};
-        stream_ = detail::try_open_daily_stream(current_path_, config_.truncate_on_open, error);
-        if (error) {
-            report_failure_("open after rotate", current_path_, error.message());
-            stream_.clear();
-        }
+        stream_.reopen(current_path_, config_.truncate_on_open, config_.err_handler,
+                       "open after rotate");
         next_rotation_ = detail::next_midnight(now);
         if (!current_path_existed_) {
             created_files_.push_back(current_path_);
@@ -185,24 +137,17 @@ private:
             auto error = std::error_code{};
             std::filesystem::remove(victim, error);
             if (error) {
-                report_failure_("remove old daily file", victim, error.message());
+                detail::report_io_failure(detail::daily_sink_name, config_.err_handler,
+                                          "remove old daily file", victim, error.message());
             }
         }
-    }
-
-    auto report_failure_(std::string_view operation,
-                         const std::filesystem::path& path,
-                         std::string_view reason) -> void {
-        auto message =
-            std::format("daily file sink {} failed for '{}': {}", operation, path.string(), reason);
-        ylog_detail_errors::safe_err_handler(config_.err_handler, message);
     }
 
     DailyFileConfig config_;
     std::function<std::chrono::system_clock::time_point()> clock_;
     std::filesystem::path current_path_;
     bool current_path_existed_{false};
-    std::ofstream stream_;
+    detail::file_stream stream_;
     std::chrono::system_clock::time_point next_rotation_{};
     std::vector<std::filesystem::path> created_files_;
 };

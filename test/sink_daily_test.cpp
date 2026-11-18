@@ -109,6 +109,30 @@ TEST(DailyFileSinkTest, ValidatesConfiguration) {
     EXPECT_THROW({ auto sink = ylog::DailyFileSink(no_clock); }, std::invalid_argument);
 }
 
+TEST(DailyFileSinkTest, ReportsOpenFailureAtConfiguration) {
+    auto directory = temp_test_path("daily-open-failure");
+    // 用同名目录占住当天的文件路径，打开必然失败。
+    std::filesystem::create_directories(directory / "app_2026-11-18.log");
+    auto now = std::make_shared<std::chrono::system_clock::time_point>(
+        local_time_point(2026, 11, 18, 10, 0, 0));
+
+    auto config = ylog::DailyFileConfig{};
+    config.filename = (directory / "app.log").string();
+    config.clock = [now] { return *now; };
+    try {
+        auto sink = ylog::DailyFileSink(config);
+        FAIL() << "opening a directory should be rejected at configuration";
+    } catch (const std::invalid_argument& error) {
+        // 配置期失败与校验失败共用一个类型前缀；文案是公开契约的一部分。
+        auto expected = std::format("DailyFileSink: failed to open '{}': ",
+                                    (directory / "app_2026-11-18.log").string());
+        EXPECT_NE(std::string_view(error.what()).find(expected), std::string_view::npos)
+            << error.what();
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
 TEST(DailyFileSinkTest, ReportsHotPathFailureToHandler) {
     if (!std::filesystem::exists("/dev/full")) {
         GTEST_SKIP() << "/dev/full is unavailable";

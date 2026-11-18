@@ -160,8 +160,8 @@ cppreference `C++26` 页面列出的相关条目：`Execution control library`�
 |---|---|---|
 | `src/sinks/sink.cppm:70` | `AnySink::buffer_` | 两个线程同时 `write` 会互相覆盖格式化缓冲，输出错乱 |
 | `src/formatter.cppm:391-397` | `formatters_`、`custom_flags_`、`cached_tm_`、`last_log_secs_` | `set_pattern` 重编译与 `format` 遍历并发 → 读到悬垂 `unique_ptr`，不只是错乱 |
-| `src/sinks/sink_file_rotating.cppm:195-196` | `stream_`、`current_size_` | 并发写导致大小计数漂移、轮转时机错误、同一文件交错 |
-| `src/sinks/sink_file_daily.cppm:219-223` | `stream_`、`next_rotation_`、`created_files_` | 同上，且保留策略可能删掉正在写的文件 |
+| `src/sinks/sink_file_rotating.cppm:117-118` | `stream_`、`current_size_` | 并发写导致大小计数漂移、轮转时机错误、同一文件交错 |
+| `src/sinks/sink_file_daily.cppm:149-151` | `stream_`、`next_rotation_`、`created_files_` | 同上，且保留策略可能删掉正在写的文件 |
 | `src/logger.cppm:97` | `sinks_`（`std::vector<AnySink>`） | 运行期 `append_sink` 会重分配，迭代器失效 |
 | `src/registry.cppm:68` | `loggers_` | `drop()` 后已发出的 `Logger&` 悬垂 |
 
