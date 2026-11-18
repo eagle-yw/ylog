@@ -69,6 +69,19 @@ auto parse_probe_line(std::string_view line) -> std::optional<ProbeLine> {
     return ProbeLine{*producer, *sequence, std::string(fields[2])};
 }
 
+// 每个用例独占临时目录：测试不往工作树里写产物。
+auto temp_test_path(std::string_view name) -> std::filesystem::path {
+    static std::atomic<std::uint64_t> counter{0};
+    auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::filesystem::temp_directory_path() /
+           std::format("ylog-rotating-{}-{}-{}", name, stamp, counter.fetch_add(1));
+}
+
+auto read_all(const std::filesystem::path& path) -> std::string {
+    auto input = std::ifstream(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
 }  // namespace
 
 struct Point {
@@ -518,14 +531,22 @@ TEST(FormatterTest, Padding) {
 }
 
 TEST(LoggerTest, FileSink) {
-    auto sink = ylog::FileSink("test.log");
+    auto directory = temp_test_path("logger-file-sink");
+    std::filesystem::create_directories(directory);
+    auto path = directory / "sink.log";
+
     auto logger = ylog::Logger("file-test");
     logger.set_level(ylog::Level::Debug);
-    logger.append_sink(std::move(sink));
+    logger.append_sink(ylog::FileSink(path.string()), "%v");
 
-    logger.debug({}, "test sink file");
-    logger.info({}, "test sink file");
-    logger.error({}, "test sink file");
+    logger.debug({}, "debug line");
+    logger.info({}, "info line");
+    logger.error({}, "error line");
+    logger.flush();
+
+    EXPECT_EQ(read_all(path), "debug line\ninfo line\nerror line\n");
+
+    std::filesystem::remove_all(directory);
 }
 
 TEST(RegistryTest, CreateAndGet) {
@@ -659,18 +680,6 @@ TEST(SinkConcurrencyTest, FormattingDoesNotHoldTheOutputLock) {
 }
 
 namespace {
-
-auto temp_test_path(std::string_view name) -> std::filesystem::path {
-    static std::atomic<std::uint64_t> counter{0};
-    auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    return std::filesystem::temp_directory_path() /
-           std::format("ylog-rotating-{}-{}-{}", name, stamp, counter.fetch_add(1));
-}
-
-auto read_all(const std::filesystem::path& path) -> std::string {
-    auto input = std::ifstream(path, std::ios::binary);
-    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-}
 
 auto local_time_point(int year, int month, int day, int hour, int minute, int second)
     -> std::chrono::system_clock::time_point {
@@ -1585,7 +1594,9 @@ TEST(AsyncLoggerTest, NonBlockingPoliciesDoNotWaitForConsumer) {
     }
 }
 
-TEST(AsyncLoggerTest, ControlMessagesAreNeverDropped) {
+// flush 用「序号 + 条件变量」而不是入队控制消息：队列满时 flush 仍能立起屏障，
+// 因为它不占队列容量。名字按现在验证的行为取。
+TEST(AsyncLoggerTest, FlushDoesNotOccupyQueueCapacity) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
     auto entered = std::counting_semaphore<64>{0};
@@ -1613,7 +1624,7 @@ TEST(AsyncLoggerTest, ControlMessagesAreNeverDropped) {
     release.release();
 
     EXPECT_TRUE(flushed.try_acquire_for(std::chrono::milliseconds(2000)))
-        << "队列满时控制消息没有送达，flush 卡住了";
+        << "队列满时 flush 卡住了：屏障不该占用队列容量";
 }
 
 TEST(AsyncLoggerTest, BlockPolicyReportsNothing) {

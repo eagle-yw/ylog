@@ -3,6 +3,7 @@ export module ylog:sink;
 import std;
 import :message;
 import :formatter;
+import ylog_detail_errors;
 
 namespace ylog {
 
@@ -122,5 +123,104 @@ private:
     mutable std::mutex formatter_mutex_;
     std::mutex output_mutex_;
 };
+
+namespace detail {
+
+// sink 调用守卫：把异常收敛成一次回调。
+// 必须是模板：-fno-exceptions 下 try/catch 的语义检查发生在实例化期，
+// 被 if constexpr 丢弃的分支才不会报「exception handling disabled」。
+template <typename Action, typename OnFailure>
+inline auto guard_sink_call(Action&& action, OnFailure&& on_failure) -> void {
+    if constexpr (ylog_detail_errors::exceptions_enabled) {
+        try {
+            std::invoke(action);
+        } catch (const std::exception& failure) {
+            std::invoke(on_failure, std::string_view(failure.what()));
+        } catch (...) {
+            std::invoke(on_failure, std::string_view("未知异常"));
+        }
+    } else {
+        std::invoke(action);
+    }
+}
+
+// sink 扇出集合：Logger 与 AsyncLogger 共用。
+//
+// 两级锁与 formatter 归属都在 AnySink 里（见 ADR-0004），这里只负责「按顺序对每个
+// sink 做一次动作」。同步路径让异常照常外传；异步路径用带回调的重载把失败收敛成上报。
+class SinkSet {
+public:
+    // 追加 sink，可为其单独指定 pattern（formatter 归属 sink）。
+    template <Sink T>
+    auto append(T&& sink, std::string_view pattern) -> void {
+        slots_.push_back(
+            Slot{AnySink(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern))});
+    }
+
+    // 追加 sink 并注入配置好的 formatter（可带自定义 flag）。
+    template <Sink T>
+    auto append(T&& sink, std::unique_ptr<Formatter> formatter) -> void {
+        slots_.push_back(Slot{AnySink(std::forward<T>(sink), std::move(formatter))});
+    }
+
+    // 为所有 sink 设置 pattern（扇出）。
+    auto set_pattern(std::string_view pattern) -> void {
+        for (auto& slot : slots_) {
+            slot.sink.set_pattern(pattern);
+        }
+    }
+
+    // 同步路径：异常照常向外传播，行为与内联循环一致。
+    auto write(const Message& message) -> void {
+        for (auto& slot : slots_) {
+            slot.sink.write(message);
+        }
+    }
+
+    // 异步路径：单个 sink 失败只回调一次并跳过，不影响其它 sink。
+    // 连续失败只上报一次，该 sink 下一次写成功即复位。
+    template <typename OnFailure>
+    auto write(const Message& message, OnFailure&& on_failure) -> void {
+        for (auto& slot : slots_) {
+            auto failure = std::string{};
+            guard_sink_call([&slot, &message] { slot.sink.write(message); },
+                            [&failure](std::string_view why) { failure = std::string(why); });
+            if (failure.empty()) {
+                slot.failing = false;
+                continue;
+            }
+            if (slot.failing) {
+                continue;
+            }
+            slot.failing = true;
+            std::invoke(on_failure, std::string_view(failure));
+        }
+    }
+
+    auto flush() -> void {
+        for (auto& slot : slots_) {
+            slot.sink.flush();
+        }
+    }
+
+    // flush 失败每次都回调：只有显式 flush 才走到这里，频率由调用方控制。
+    template <typename OnFailure>
+    auto flush(OnFailure&& on_failure) -> void {
+        for (auto& slot : slots_) {
+            guard_sink_call([&slot] { slot.sink.flush(); }, on_failure);
+        }
+    }
+
+private:
+    // sink 与它的失败状态放在一起：连续失败只在进入失败状态时上报一次。
+    struct Slot {
+        AnySink sink;
+        bool failing{false};
+    };
+
+    std::vector<Slot> slots_;
+};
+
+}  // namespace detail
 
 }  // namespace ylog

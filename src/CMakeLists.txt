@@ -4,6 +4,7 @@ set(YLOG_MODULE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/level.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/message.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/formatter.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/logger_base.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/logger.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/async.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/registry.cppm
