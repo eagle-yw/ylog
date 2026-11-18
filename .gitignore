@@ -1,7 +1,7 @@
 .cache
 .vscode
 .idea
-
+.codebuddy
 .scratch
 
 build
