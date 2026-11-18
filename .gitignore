@@ -1,2 +1,9 @@
 .cache
+.vscode
+.idea
+
+.scratch
+
 build
+out
+tmp

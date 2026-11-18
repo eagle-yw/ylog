@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  format:
+    name: clang-format check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format 23
+        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 23 all
+      - name: Check formatting
+        run: |
+          files=$(find src example test -type f \( -name '*.cppm' -o -name '*.cpp' \) -print)
+          clang-format-23 --dry-run --Werror $files
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 23 all
+          sudo apt-get install -y ninja-build
+          python3 -m pip install --break-system-packages cmake
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++-23 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Run clang-tidy
+        run: |
+          find src example test -type f \( -name '*.cppm' -o -name '*.cpp' \) -print0 \
+            | xargs -0 clang-tidy-23 -p build
+
+  build-and-test:
+    name: build & test (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++-16, clang++-23]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          if [ "${{ matrix.compiler }}" = "g++-16" ]; then
+            sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+            sudo apt-get update
+            sudo apt-get install -y g++-16
+          else
+            wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 23 all
+          fi
+          sudo apt-get install -y ninja-build
+          python3 -m pip install --break-system-packages cmake
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wconversion -pedantic -Werror"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

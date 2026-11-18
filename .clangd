@@ -1,0 +1,6 @@
+# clangd 无法解析 GCC 的 -fmodules-ts / module mapper / .gcm BMI。
+# 因此使用 clang preset 生成的编译数据库（@*.modmap + .pcm）。
+# 修改任何 .cppm 后必须重新构建 clang preset 以更新 BMI，
+# 否则 clangd 仍会读取旧的 .pcm。
+CompileFlags:
+  CompilationDatabase: out/build/clang
