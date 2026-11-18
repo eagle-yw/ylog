@@ -23,7 +23,7 @@
 
 ## 命名
 
-- 类型 PascalCase；自由函数、枚举值、常量 snake_case；成员函数使用尾置返回类型 `auto f(...) -> T`。
+- 类型与公开枚举值 PascalCase（`Level::Warning`、`OverflowPolicy::Block`）；自由函数、常量、`detail` 内的实现枚举 snake_case（`level_count`、`side::left`）；成员函数使用尾置返回类型 `auto f(...) -> T`。
 - 模块名 `ylog:<sub>`，内部细节放入 `detail`。
 - 保留中文注释；命名与 `GLOSSARY.md` 的术语一致。
 

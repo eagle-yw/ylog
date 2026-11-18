@@ -31,5 +31,17 @@ _Avoid_: 记录器实例、log object
 **AsyncLogger**：把 Message 入队、由工作线程投递给 Sink 的 Logger。
 _Avoid_: 异步记录器、async sink
 
+**OverflowPolicy**：`AsyncLogger` 队列满时的处置方式，构造后不可变。`Block` 等待空位，`OverrunOldest` 覆盖最旧的一条，`DiscardNew` 丢弃新来的一条。
+_Avoid_: 背压策略、丢弃模式
+
+**ErrorHandler**：`AsyncLogger` 热路径失败的通知回调，形如 `std::function<void(std::string_view)>`；入参是借用视图，只在调用期间有效。
+_Avoid_: 错误回调、日志回调
+
+**Flush 屏障**：`flush()` 的返回条件——它返回时，此前入队的消息都已写出、且每个 Sink 都已落盘。
+_Avoid_: 同步点、flush 完成
+
+**丢弃上报 / 覆盖上报**：非阻塞策略每丢掉一条消息就经 ErrorHandler 通知一次；组件不提供丢弃计数器。
+_Avoid_: 丢弃统计、溢出次数
+
 **Registry**：按名称管理 `Logger` 实例的集中位置，负责创建、查找与移除。
 _Avoid_: 日志管理器、factory
