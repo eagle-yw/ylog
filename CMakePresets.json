@@ -31,7 +31,7 @@
         {
             "name": "clang",
             "displayName": "Clang 23.1.5 (供 clangd 使用)",
-            "description": "生成 clangd 所需的编译数据库与模块 BMI；clangd 版本须与 clang 一致",
+            "description": "只服务 clangd：clang 23 无 P2996 反射，无法构建本库（见 issue #43）。生成编译数据库与模块 BMI；clangd 版本须与 clang 一致",
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {

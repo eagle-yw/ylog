@@ -29,7 +29,7 @@ jobs:
 
   # clang-tidy 暂不进入 CI：clang 23 尚未实现 P2996 静态反射（`^^T` / `std::meta::*`），
   # src/message.cppm 无法解析，而其余 TU 都要拿它的 BMI，tidy 拿不到可用编译单元。
-  # 等 clang 支持反射后恢复本 job（配置见 .clang-tidy）。
+  # 主动暂缓，不是遗漏：见 issue #43（clang 落地 P2996 后恢复本 job，配置见 .clang-tidy）。
 
   # 暂时只跑 GCC：Clang 的 C++26 模块/std 支持仍在追平，等其能过完整构建再回到矩阵。
   # 矩阵覆盖产物开关 YLOG_NO_EXCEPTIONS 的两侧；OFF 的构建内部还会用

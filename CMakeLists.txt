@@ -15,7 +15,7 @@ set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 
-# GCC16 静态反射 (P2996) 需要显式开启
+# GCC16 静态反射 (P2996) 需要显式开启；clang 尚未实现，故 Clang 构建矩阵暂缓（issue #43）
 add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-freflection>)
 
 # For Clang, to ignore deprecated warnings

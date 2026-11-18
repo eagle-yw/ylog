@@ -1,3 +1,6 @@
+# 暂缓：clang 23 无 P2996 静态反射，无法解析 src/message.cppm，其余 TU 也拿不到
+# 可用 BMI。本配置先留着，解锁条件与恢复步骤见 issue #43。
+
 Checks: >
   clang-analyzer-*,
   bugprone-*,

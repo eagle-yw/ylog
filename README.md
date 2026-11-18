@@ -55,3 +55,7 @@ clang-format -i $(find src example test -type f \( -name '*.cppm' -o -name '*.cp
 `clang-tidy` 目前跑不起来，也不在 CI 里：clang 23 尚未实现 P2996 静态反射
 （`^^T` / `std::meta::*`），`src/message.cppm` 无法解析，而其余编译单元都要拿它的
 BMI。配置留在 `.clang-tidy`，等 clang 支持反射后恢复。
+
+clang 侧的缺口（clang-tidy、Clang 构建矩阵）是**主动暂缓**，不是遗漏：
+本仓库优先试最新语言特性，不为下游工具链退化实现。解除条件与解锁后的动作记在
+[#43](https://github.com/eagle-yw/ylog/issues/43)，clang 落地 P2996 后按那张清单回来处理。
