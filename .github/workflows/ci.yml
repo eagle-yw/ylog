@@ -35,9 +35,15 @@ jobs:
             | xargs -0 clang-tidy-23 -p build
 
   # 暂时只跑 GCC：Clang 的 C++26 模块/std 支持仍在追平，等其能过完整构建再回到矩阵。
+  # 矩阵覆盖产物开关 YLOG_NO_EXCEPTIONS 的两侧；OFF 的构建内部还会用
+  # YLOG_BUILD_NOEXC_TESTS 额外编一份无异常库，单次 ctest 同时跑两种模式。
   build-and-test:
-    name: build & test (g++-16)
+    name: build & test (g++-16, YLOG_NO_EXCEPTIONS=${{ matrix.no_exceptions }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        no_exceptions: [OFF, ON]
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
@@ -47,7 +53,7 @@ jobs:
           sudo apt-get install -y g++-16 ninja-build
           python3 -m pip install --break-system-packages cmake
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-16 -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wconversion -pedantic -Werror"
+        run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=g++-16 -DYLOG_NO_EXCEPTIONS=${{ matrix.no_exceptions }} -DCMAKE_CXX_FLAGS="-Wall -Wextra -Wconversion -pedantic -Werror"
       - name: Build
         run: cmake --build build
       - name: Test
