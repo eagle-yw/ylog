@@ -14,3 +14,4 @@ export import :sink.ringbuffer;
 export import :logger;
 export import :async;
 export import :registry;
+export import :logging;

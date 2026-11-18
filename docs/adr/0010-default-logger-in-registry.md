@@ -1,0 +1,25 @@
+# default logger 归 Registry 持有，自由函数移入独立分区
+
+`default_logger()` 过去是 `ylog:logger` 内的函数内 static，与 `Registry` 里名为 `default` 的槽位是两个不同实例：`create("default")` 会造出同名不同物。本次裁决为单一身份——默认 logger 就是 `Registry` 中名为 `default` 的常驻槽位，`default_logger()` 返回它，因此 `ylog::set_level()` 与 `Registry::set_level("default", …)` 是同一件事。
+
+分区结构上，`ylog:registry` 依赖 `ylog:logger`（Registry 持有 Logger），把 `default_logger()` 直接写进 `:logger` 会造成分区级循环依赖。`default_logger()` 与八个自由函数（`set_level` / `set_pattern` / `log` / `trace` / `debug` / `info` / `warning` / `error` / `critical`）一并移入新的 `ylog:logging`，它同时 import `:logger` 与 `:registry`；`ylog:logger` 只留 `Logger` 类本身。分区名不能叫 `default`——它是关键字，而模块分区名只接受标识符，写成 `export module ylog:default;` 会被扫描器误当成主接口单元。对外仍是 `import ylog` 一个入口，只有直接 `import ylog:logger` 的调用方会丢掉这些符号。
+
+`default` 是常驻名：`drop("default")` 返回 `false`，`drop_all()` 跳过它。理由是 `default_logger()` 缓存一个 `static Logger&` 引用（实例归 Registry，引用只解析一次，热路径仍然无锁），摘除会让该引用悬垂。语义上与 `std::cout` 同类：进程级默认输出不接受关闭。代价是 `drop_all()` 不再是「清空一切」。
+
+槽位懒创建：首次 `default_logger()` 或 `create("default")` 时建。因此 `contains("default")` 在任何人使用默认 logger 之前为 `false`，如实反映「有没有人用过」。`create("default")` 天然幂等（`create` 对同名同步 logger 本就幂等），不需要为默认名写特例。`create_async("default")` 按既有规则抛 `std::invalid_argument`——名字已被占用。
+
+不提供 `set_default_logger`。spdlog 有它，是因为它用 `shared_ptr` 发布所有权，换指针不涉及销毁；ADR-0007 已否决该方案，`create` / `create_async` 只返回引用，Registry 是唯一持有者。setter 需要调用方外部持有实例，与此所有权模型不能并存。要换目标就显式持有并使用那个 logger；默认槽位只服务自由函数。
+
+## Considered Options
+
+- **保留独立 static + 补 `set_default_logger`**：两套语义永久共存，用户第一次 `create("default")` 就踩到同名不同物；且 setter 同样与 ADR-0007 冲突。
+- **`default_logger()` 每次经 Registry 查表**：`drop("default")` 的语义最干净（下次调用重建），但每条日志多一次无竞争互斥——而 `ylog::info()` 正是最随手的那条路。
+- **允许 `drop("default")` 且保留缓存引用**：悬垂引用，直接排除。
+- **`set_default_logger(std::string_view name)`**：把「默认」做成指向已注册名字的间接层，可行，但缓存引用退化成每次查表，回到上一条的锁开销。
+- **饿创建槽位**（Registry 构造时即建）：`contains("default")` 恒真，但「空注册表」这个概念随之消失。
+
+## Consequences
+
+- 新增 `ylog:logging` 分区，`ylog.cppm` 要与其余分区一并 `export import`。
+- `drop_all()` 的注释与测试须写明「default 除外」，`drop("default")` 的返回值语义要有测试覆盖。
+- 直接 `import ylog:logger` 的调用方会丢掉默认 logger 与自由函数，须在 CHANGELOG / 迁移说明里点出。当前 `test/` 与 `example/` 均只 `import ylog`，无实际影响。

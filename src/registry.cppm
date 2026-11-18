@@ -23,6 +23,9 @@ namespace ylog {
 //
 // 并发契约：创建/摘除/配置属配置期操作；flush_all() 先取快照再逐个 flush，避免持锁
 // 等待异步组件的屏障。
+// 默认 logger 的保留名：由 :default 的 default_logger() 懒创建，且不可摘除（ADR-0010）。
+export inline constexpr std::string_view default_logger_name = "default";
+
 export class Registry {
 public:
     static auto instance() -> Registry& {
@@ -82,7 +85,11 @@ public:
     }
 
     // 摘除并销毁：同步 logger 直接释放，异步组件在锁外排空后退出。
+    // default 是常驻槽位——default_logger() 缓存了它的引用，摘除会让引用悬垂。
     auto drop(std::string_view name) -> bool {
+        if (name == default_logger_name) {
+            return false;
+        }
         auto removed = Entry{};
         {
             std::lock_guard lock(mutex_);
@@ -96,11 +103,19 @@ public:
         return true;  // removed 在此析构，异步组件的排空不持注册表锁
     }
 
+    // 摘除其余全部条目，default 除外（它同样不可摘除，理由见 drop）。
     auto drop_all() -> void {
-        auto entries = Table{};
+        auto removed = Table{};
         {
             std::lock_guard lock(mutex_);
-            entries.swap(entries_);
+            auto it = entries_.begin();
+            while (it != entries_.end()) {
+                if (std::string_view{it->first} == default_logger_name) {
+                    ++it;
+                    continue;
+                }
+                removed.insert(entries_.extract(it++));
+            }
         }
         // 局部表在此析构：异步组件逐个排空，期间不持注册表锁。
     }

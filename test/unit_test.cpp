@@ -955,6 +955,42 @@ TEST(RegistryTest, CreateAndGet) {
     EXPECT_FALSE(registry.contains("test-app"));
 }
 
+TEST(RegistryTest, DefaultLoggerIsRegistrySlot) {
+    auto& registry = ylog::Registry::instance();
+    auto& logger = ylog::default_logger();
+
+    // 默认 logger 与 create("default") 是同一个实例，没有第二份同名实现（ADR-0010）。
+    EXPECT_EQ(&logger, &registry.create("default"));
+    EXPECT_EQ(&logger, registry.get("default"));
+    EXPECT_EQ(logger.name(), ylog::default_logger_name);
+}
+
+TEST(RegistryTest, DefaultLoggerIsPermanent) {
+    auto& registry = ylog::Registry::instance();
+    auto* logger = &ylog::default_logger();
+
+    EXPECT_FALSE(registry.drop("default"));
+    EXPECT_TRUE(registry.contains("default"));
+    EXPECT_EQ(&ylog::default_logger(), logger);
+
+    registry.create("doomed");
+    registry.drop_all();
+    EXPECT_FALSE(registry.contains("doomed"));
+    EXPECT_TRUE(registry.contains("default"));
+    EXPECT_EQ(&ylog::default_logger(), logger);
+}
+
+TEST(RegistryTest, FreeFunctionsTargetDefaultSlot) {
+    auto& registry = ylog::Registry::instance();
+
+    ylog::set_level(ylog::Level::Warning);
+    EXPECT_EQ(ylog::default_logger().level(), ylog::Level::Warning);
+
+    // 按名字配置与自由函数作用于同一实例，两条路径可互换。
+    EXPECT_TRUE(registry.set_level(ylog::default_logger_name, ylog::Level::Error));
+    EXPECT_EQ(ylog::default_logger().level(), ylog::Level::Error);
+}
+
 TEST(SinkTest, ConceptCheck) {
     static_assert(ylog::Sink<ylog::StdoutSink>);
     static_assert(ylog::Sink<ylog::FileSink>);

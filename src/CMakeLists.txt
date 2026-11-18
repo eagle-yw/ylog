@@ -8,6 +8,7 @@ set(YLOG_MODULE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/logger.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/async.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/registry.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/logging.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/detail/errors.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/detail/os.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/sinks/sink.cppm

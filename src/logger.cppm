@@ -36,42 +36,4 @@ public:
     }
 };
 
-export auto default_logger() -> Logger& {
-    static Logger logger("default");
-    return logger;
-}
-
-export auto set_level(Level target) -> void { default_logger().set_level(target); }
-export auto set_pattern(std::string_view pattern) -> void { default_logger().set_pattern(pattern); }
-
-export template <typename... Args>
-auto log(SourceLocation loc, Level level, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, level, fmt, std::forward<Args>(args)...);
-}
-
-export template <typename... Args>
-auto trace(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, Level::Trace, fmt, std::forward<Args>(args)...);
-}
-export template <typename... Args>
-auto debug(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, Level::Debug, fmt, std::forward<Args>(args)...);
-}
-export template <typename... Args>
-auto info(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, Level::Info, fmt, std::forward<Args>(args)...);
-}
-export template <typename... Args>
-auto warning(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, Level::Warning, fmt, std::forward<Args>(args)...);
-}
-export template <typename... Args>
-auto error(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, Level::Error, fmt, std::forward<Args>(args)...);
-}
-export template <typename... Args>
-auto critical(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
-    default_logger().log(loc, Level::Critical, fmt, std::forward<Args>(args)...);
-}
-
 }  // namespace ylog

@@ -19,6 +19,21 @@ _Avoid_: 输出器、handler、destination
 **ColorMode**：Sink 对颜色的态度。`Never` 永不着色，`Always` 始终着色，`Automatic` 在配置期按输出是否连着终端定型为前两者之一。上色由 `AnySink` 执行，Sink 只用可选的 `color_mode()` 声明模式。
 _Avoid_: 彩色输出、color scheme
 
+**NullSink**：丢弃所有行的 Sink，无配置、无状态；用于基准测试，或临时关掉某个目的地。它是 Sink 协议可选部分（如 `flush()`）的验证点。
+_Avoid_: 空 sink、noop sink
+
+**OstreamSink**：把行写进调用方给定的任意 `std::ostream` 的 Sink。不拥有 stream，生命周期由调用方保证；颜色按 `ColorMode` 配置，非 `std::cout` / `std::cerr` 的输出一律按非终端定型。
+_Avoid_: stream sink、stderr sink
+
+**CallbackSink**：把格式化后的整行交给调用方函数的 Sink。级别与 logger 名需由 pattern 自带；回调在输出锁下调用，因此不得重入同一个 logger。
+_Avoid_: handler sink、lambda sink
+
+**RingBufferStore**：环形缓冲的读句柄，与被写入的 Sink 分离，由调用方持有。容量在构造期固定，读取方可在任意线程。它只存行，不参与格式化，也不属于 Sink。
+_Avoid_: ring buffer、日志缓存
+
+**RingBufferSink**：把行写进调用方持有的 `RingBufferStore` 的 Sink。store 必须比使用它的 logger 活得久；它无 I/O，因此没有 `err_handler`。
+_Avoid_: memory sink、ringbuffer
+
 **Formatter**：将 `Message` 按模式转换为输出文本的规则。
 _Avoid_: 格式器、layout、pattern engine
 
