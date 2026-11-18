@@ -201,24 +201,6 @@ private:
 
 namespace detail {
 
-// sink 调用守卫：把异常收敛成一次回调。
-// 必须是模板：-fno-exceptions 下 try/catch 的语义检查发生在实例化期，
-// 被 if constexpr 丢弃的分支才不会报「exception handling disabled」。
-template <typename Action, typename OnFailure>
-inline auto guard_sink_call(Action&& action, OnFailure&& on_failure) -> void {
-    if constexpr (ylog_detail_errors::exceptions_enabled) {
-        try {
-            std::invoke(action);
-        } catch (const std::exception& failure) {
-            std::invoke(on_failure, std::string_view(failure.what()));
-        } catch (...) {
-            std::invoke(on_failure, std::string_view("未知异常"));
-        }
-    } else {
-        std::invoke(action);
-    }
-}
-
 // sink 扇出集合：Logger 与 AsyncLogger 共用。
 //
 // 两级锁与 formatter 归属都在 AnySink 里（见 ADR-0004），这里只负责「按顺序对每个
@@ -270,8 +252,9 @@ public:
     auto write(const Message& message, OnFailure&& on_failure) -> void {
         for (auto index = std::size_t{0}; index < sinks_.size(); ++index) {
             auto failure = std::string{};
-            guard_sink_call([this, index, &message] { sinks_[index].write(message); },
-                            [&failure](std::string_view why) { failure = std::string(why); });
+            ylog_detail_errors::guard_call(
+                [this, index, &message] { sinks_[index].write(message); },
+                [&failure](std::string_view why) { failure = std::string(why); });
             if (failure.empty()) {
                 failing_[index] = false;
                 continue;
@@ -294,7 +277,7 @@ public:
     template <typename OnFailure>
     auto flush(OnFailure&& on_failure) -> void {
         for (auto& sink : sinks_) {
-            guard_sink_call([&sink] { sink.flush(); }, on_failure);
+            ylog_detail_errors::guard_call([&sink] { sink.flush(); }, on_failure);
         }
     }
 

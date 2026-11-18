@@ -148,6 +148,27 @@ auto logger_public_surface_behaves() -> void {
     check(flushes->load(std::memory_order_relaxed) == 1, "flush_on flushes at the threshold");
 }
 
+// 通用 sink 的两种新目的地：回调与环形缓冲。无异常构建下回调不捕获异常
+// （抛出即终止是既定口径），这里只覆盖配置成功的正常路径。
+auto generic_sinks_behave() -> void {
+    auto seen = std::string{};
+    auto store = ylog::RingBufferStore(2);
+
+    auto config = ylog::CallbackConfig{};
+    config.fn = [&seen](std::string_view line) { seen += line; };
+
+    auto logger = ylog::Logger("noexc-generic");
+    logger.set_level(ylog::Level::Info);
+    logger.append_sink(ylog::CallbackSink(config), "%v");
+    logger.append_sink(ylog::RingBufferSink(store), "%v");
+    logger.info({}, "generic");
+    logger.flush();
+
+    check(seen == "generic\n", "callback sink receives the formatted line");
+    auto lines = store.last(2);
+    check(lines.size() == 1 && lines[0] == "generic\n", "ring buffer sink stores the line");
+}
+
 // 无异常构建下配置失败是 assert + println + terminate：断言只表达前置条件，
 // NDEBUG 下会被编译掉，终止是无条件的。这条路径无法在进程内自检（一旦触发就没了），
 // 只能靠文件顶部的 static_assert 确认开关口径；此处不构造非法配置。
@@ -393,6 +414,7 @@ auto main() -> int {
     reports_hot_path_failure();
     universal_sinks_behave();
     logger_public_surface_behaves();
+    generic_sinks_behave();
 
     if (failures != 0) {
         std::println(std::cerr, "{} check(s) failed", failures);

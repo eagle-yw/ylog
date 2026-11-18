@@ -16,6 +16,8 @@ set(YLOG_MODULE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/sinks/sink_file.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/sinks/sink_file_rotating.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/sinks/sink_file_daily.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/sinks/sink_callback.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/sinks/sink_ringbuffer.cppm
 )
 
 add_library(ylog)

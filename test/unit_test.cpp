@@ -794,6 +794,156 @@ TEST(FileSinkTest, ReportsHotPathFailureOnce) {
     EXPECT_EQ(failures, 1);
 }
 
+TEST(RingBufferStoreTest, RejectsZeroCapacityAtConfiguration) {
+    EXPECT_THROW({ auto store = ylog::RingBufferStore(0); }, std::invalid_argument);
+}
+
+TEST(RingBufferStoreTest, KeepsTheMostRecentLinesInOrder) {
+    auto store = ylog::RingBufferStore(3);
+    for (int index = 0; index < 5; ++index) {
+        store.push(std::format("line-{}\n", index));
+    }
+
+    EXPECT_EQ(store.capacity(), 3u);
+    EXPECT_EQ(store.size(), 3u);
+
+    auto recent = store.last(3);
+    ASSERT_EQ(recent.size(), 3u);
+    EXPECT_EQ(recent[0], "line-2\n");
+    EXPECT_EQ(recent[1], "line-3\n");
+    EXPECT_EQ(recent[2], "line-4\n");
+
+    // n >= size() 时返回全部，顺序不变。
+    EXPECT_EQ(store.last(10), recent);
+}
+
+TEST(RingBufferStoreTest, ConcurrentWritersAndReadersNeverTearALine) {
+    auto store = ylog::RingBufferStore(64);
+    constexpr auto producer_count = 4;
+    constexpr auto per_producer = 200;
+    auto stop_reading = std::atomic<bool>{false};
+    auto torn_lines = std::atomic<int>{0};
+
+    auto producers = std::vector<std::thread>{};
+    for (int producer = 0; producer < producer_count; ++producer) {
+        producers.emplace_back([&store, producer] {
+            for (int sequence = 0; sequence < per_producer; ++sequence) {
+                store.push(std::format("{}-{:04d}-{}", producer, sequence, std::string(40, 'x')));
+            }
+        });
+    }
+
+    auto reader = std::thread([&store, &stop_reading, &torn_lines] {
+        while (!stop_reading.load()) {
+            for (const auto& line : store.last(64)) {
+                auto parsed = parse_probe_line(line);
+                if (!parsed || parsed->payload != std::string(40, 'x')) {
+                    torn_lines.fetch_add(1);
+                }
+            }
+        }
+    });
+
+    for (auto& producer : producers) {
+        producer.join();
+    }
+    stop_reading = true;
+    reader.join();
+
+    EXPECT_EQ(torn_lines.load(), 0);
+    EXPECT_EQ(store.size(), 64u);
+}
+
+TEST(RingBufferSinkTest, PushesFormattedLinesIntoTheStore) {
+    static_assert(ylog::Sink<ylog::RingBufferSink>);
+
+    auto store = ylog::RingBufferStore(4);
+    auto logger = ylog::Logger("ring-buffer");
+    logger.set_level(ylog::Level::Info);
+    logger.append_sink(ylog::RingBufferSink(store), "%v");
+
+    logger.info({}, "one");
+    logger.info({}, "two");
+    logger.flush();
+
+    auto lines = store.last(4);
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_EQ(lines[0], "one\n");
+    EXPECT_EQ(lines[1], "two\n");
+}
+
+TEST(CallbackSinkTest, ReceivesTheSameLineAsOstreamSink) {
+    static_assert(ylog::Sink<ylog::CallbackSink>);
+
+    auto captured = std::ostringstream{};
+    auto from_callback = std::string{};
+    auto config = ylog::CallbackConfig{};
+    config.fn = [&from_callback](std::string_view line) { from_callback = std::string(line); };
+
+    auto logger = ylog::Logger("callback-parity");
+    logger.set_level(ylog::Level::Warning);
+    logger.append_sink(ylog::CallbackSink(config));
+    logger.append_sink(ylog::OstreamSink(ylog::OstreamConfig{.stream = &captured}));
+
+    logger.warning({}, "same {}", "line");
+
+    EXPECT_EQ(from_callback, captured.str());
+    EXPECT_TRUE(from_callback.ends_with("same line\n")) << from_callback;
+}
+
+TEST(CallbackSinkTest, RejectsEmptyCallbackAtConfiguration) {
+    EXPECT_THROW(
+        { auto sink = ylog::CallbackSink(ylog::CallbackConfig{}); }, std::invalid_argument);
+}
+
+TEST(CallbackSinkTest, ReportsThrownCallbackOnceAndKeepsLogging) {
+    auto reports = std::atomic<int>{0};
+    auto store = ylog::RingBufferStore(4);
+    auto config = ylog::CallbackConfig{};
+    config.fn = [](std::string_view line) {
+        if (line.starts_with("boom")) {
+            throw std::runtime_error("callback failed");
+        }
+    };
+    config.err_handler = [&reports](std::string_view) {
+        reports.fetch_add(1, std::memory_order_relaxed);
+    };
+
+    auto logger = ylog::Logger("callback-throws");
+    logger.set_level(ylog::Level::Info);
+    logger.append_sink(ylog::CallbackSink(config), "%v");
+    logger.append_sink(ylog::RingBufferSink(store), "%v");
+
+    EXPECT_NO_THROW(logger.info({}, "boom"));
+    EXPECT_EQ(reports.load(), 1);
+
+    // 回调失败只影响它自己那一次调用：logger 继续工作，其它 sink 照常收到行。
+    EXPECT_NO_THROW(logger.info({}, "ok"));
+    EXPECT_EQ(reports.load(), 1);
+    EXPECT_EQ(store.last(4), (std::vector<std::string>{"boom\n", "ok\n"}));
+}
+
+TEST(GenericSinkTest, FanOutKeepsAppendSinkOrder) {
+    auto order = std::string{};
+    auto store = ylog::RingBufferStore(4);
+    auto logger = ylog::Logger("fan-out");
+    logger.set_level(ylog::Level::Info);
+
+    auto first = ylog::CallbackConfig{};
+    first.fn = [&order](std::string_view) { order += "first;"; };
+    auto second = ylog::CallbackConfig{};
+    second.fn = [&order](std::string_view) { order += "second;"; };
+
+    logger.append_sink(ylog::CallbackSink(first), "%v");
+    logger.append_sink(ylog::RingBufferSink(store), "%v");
+    logger.append_sink(ylog::CallbackSink(second), "%v");
+
+    logger.info({}, "msg");
+
+    EXPECT_EQ(order, "first;second;");
+    EXPECT_EQ(store.last(1), std::vector<std::string>{"msg\n"});
+}
+
 TEST(RegistryTest, CreateAndGet) {
     auto& registry = ylog::Registry::instance();
     auto& logger = registry.create("test-app");

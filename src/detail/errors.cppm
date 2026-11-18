@@ -69,6 +69,24 @@ private:
     bool reported_{false};
 };
 
+// 把一次可能抛出的调用收敛成一次上报：异常文本交给 on_failure，调用方继续工作。
+// 必须是模板：-fno-exceptions 下 try/catch 的语义检查发生在实例化期，
+// 被 if constexpr 丢弃的分支才不会报「exception handling disabled」。
+export template <typename Action, typename OnFailure>
+auto guard_call(Action&& action, OnFailure&& on_failure) -> void {
+    if constexpr (exceptions_enabled) {
+        try {
+            std::invoke(action);
+        } catch (const std::exception& failure) {
+            std::invoke(on_failure, std::string_view(failure.what()));
+        } catch (...) {
+            std::invoke(on_failure, std::string_view("未知异常"));
+        }
+    } else {
+        std::invoke(action);
+    }
+}
+
 export template <bool Enabled = exceptions_enabled, class F>
 auto safe_err_handler(F&& handler, std::string_view message) -> void {
     if constexpr (Enabled) {
