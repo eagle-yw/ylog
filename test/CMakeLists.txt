@@ -27,10 +27,29 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(googletest)
 
 
-add_executable(unit_test unit_test.cpp)
+# 按测试套件拆分：每类能力一个 TU，共享夹具在 test_support 模块里。
+add_executable(unit_test
+    logger_test.cpp
+    formatter_test.cpp
+    async_logger_test.cpp
+    registry_test.cpp
+    sink_test.cpp
+    sink_ostream_test.cpp
+    sink_color_test.cpp
+    sink_file_test.cpp
+    sink_rotating_test.cpp
+    sink_daily_test.cpp
+    sink_callback_test.cpp
+    sink_ringbuffer_test.cpp
+)
 
-target_link_libraries(unit_test 
-    gtest 
+target_sources(unit_test
+    PRIVATE FILE_SET CXX_MODULES FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_support.cppm
+)
+
+target_link_libraries(unit_test
+    gtest
     gtest_main
     ylog
 )
