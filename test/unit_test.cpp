@@ -1751,13 +1751,56 @@ TEST(AsyncLoggerTest, SinksExposeEveryAppendedSink) {
     EXPECT_EQ(logger.sinks()[initial].pattern(), "%v");
 }
 
+TEST(AsyncLoggerTest, SinksConfigureIndividually) {
+    auto first = std::make_shared<AsyncRecordingSink::State>();
+    auto second = std::make_shared<AsyncRecordingSink::State>();
+    auto first_sink = AsyncRecordingSink{first};
+    auto second_sink = AsyncRecordingSink{second};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-configure"});
+    logger.append_sink(first_sink, "%v");
+    logger.append_sink(second_sink, "%v");
+    auto first_index = logger.sinks().size() - 2;
+
+    // 扇出：配置期的 set_formatter 让每个 sink 拿到独立 clone。
+    logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
+    logger.info({}, "shared");
+    ASSERT_TRUE(first_sink.wait_for(1, std::chrono::milliseconds(1000)));
+    ASSERT_TRUE(second_sink.wait_for(1, std::chrono::milliseconds(1000)));
+    EXPECT_EQ(first_sink.snapshot().back(), "Info|shared\n");
+    EXPECT_EQ(second_sink.snapshot().back(), "Info|shared\n");
+
+    // 逐 sink 配置：sinks() 交出的元素仍可改，改一个不影响另一个。
+    logger.sinks()[first_index].set_pattern("%v");
+    logger.info({}, "own");
+    ASSERT_TRUE(wait_until([&first] {
+        std::lock_guard lock(first->mutex);
+        return first->lines.size() >= 2;
+    }));
+    ASSERT_TRUE(wait_until([&second] {
+        std::lock_guard lock(second->mutex);
+        return second->lines.size() >= 2;
+    }));
+    EXPECT_EQ(first_sink.snapshot().back(), "own\n");
+    EXPECT_EQ(second_sink.snapshot().back(), "Info|own\n");
+}
+
 TEST(AsyncLoggerTest, FlushOnFlushesWithoutAnExplicitFlush) {
     auto flushes = std::atomic<int>{0};
+    auto recorded = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{recorded};
     auto logger =
         ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-flush-on", .queue_capacity = 8});
+    logger.append_sink(view, "%v");
     logger.append_sink(FlushCountingSink{&flushes});
-    logger.flush_on(ylog::Level::Warning);
 
+    // 默认 Off：消息照常投递，但日志路径一次都不 flush。
+    EXPECT_EQ(logger.flush_level(), ylog::Level::Off);
+    logger.error({}, "default is off");
+    ASSERT_TRUE(view.wait_for(1, std::chrono::milliseconds(1000)));
+    EXPECT_EQ(flushes.load(), 0);
+
+    logger.flush_on(ylog::Level::Warning);
     logger.info({}, "below the threshold");
     EXPECT_EQ(flushes.load(), 0);
 

@@ -337,8 +337,9 @@ private:
                 processed_sequence_ = item.sequence + 1;
                 continue;
             }
-            // 走到这里只可能是「还有没写到的目标」或「已收到停止请求」；前者意味着
-            // 目标对应的消息还在队列里，后者意味着没人会再推进 processed_sequence_。
+            // 走到这里只剩「已收到停止请求」一种可能：目标序号总是在入队成功后取
+            // 刚分配的那个序号，而队列按 FIFO 写、覆盖策略只删队首，所以目标之内的
+            // 序号要么被写出、要么被更晚的写出顺带推过，processed_sequence_ 必定追上它。
             assert(flush_target_ <= flushed_sequence_ || token.stop_requested());
             if (token.stop_requested()) {
                 worker_finished_ = true;

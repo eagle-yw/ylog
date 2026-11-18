@@ -64,12 +64,13 @@ public:
     }
 
     // 给每个 sink 注入同一份 formatter 配置：逐 sink clone，之后各自独立演进。
+    // 空入参先判：这是调用方违约，与「组件是否已封板」无关。
     auto set_formatter(std::unique_ptr<Formatter> formatter) -> void {
-        ensure_configurable();
         if (!formatter) {
             ylog_detail_errors::fail_config<std::invalid_argument>(
                 "set_formatter 需要一个非空的 formatter");
         }
+        ensure_configurable();
         sinks_.set_formatter(*formatter);
     }
 

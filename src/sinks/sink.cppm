@@ -102,7 +102,12 @@ public:
         formatter_->set_pattern(pattern);
     }
 
+    // 空 formatter 会让 write / pattern 空解引用，因此在唯一入口处就拒绝。
     auto set_formatter(std::unique_ptr<Formatter> formatter) -> void {
+        if (!formatter) {
+            ylog_detail_errors::fail_config<std::invalid_argument>(
+                "set_formatter 需要一个非空的 formatter");
+        }
         std::lock_guard lock(formatter_mutex_);
         formatter_ = std::move(formatter);
     }

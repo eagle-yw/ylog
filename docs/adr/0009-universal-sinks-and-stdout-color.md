@@ -8,7 +8,7 @@ stdout 颜色不是「另一种 sink」，而是同一个 sink 的一种模式�
 
 失败上报沿用 ADR-0005 的口径，不新增全局入口：配置期 `fail_config`（有异常时抛、`YLOG_NO_EXCEPTIONS` 下 assert + 终止），热路径 per-sink `err_handler`（`std::function<void(std::string_view)>`，默认限频写 stderr）。`FileSink` 目前热路径静默、且没有配置结构体，本次对齐为 `FileConfig` + `err_handler`；`OstreamSink` / `CallbackSink` 同样带 handler；`RingBufferSink` 无 I/O，不设 handler。
 
-常用能力一并裁决：`flush_on(Level)` 采纳（`LoggerBase` 的配置期 setter，默认 `Off`），同步 logger 在写出后即时 flush，异步 logger 由工作线程在处理完该条之后 flush sink，不阻塞生产者，也不占队列槽位；公开 `should_log(Level) const` 采纳；`set_formatter(std::unique_ptr<Formatter>)` 采纳并扇出到每个 sink（逐 sink `clone()`，这正是 `Formatter::clone()` 的用途）；`sinks()` 访问器采纳，返回 `std::span<AnySink>`——结构不可变、元素可配置，后续 `append_sink` 会使之失效。`flush_every(interval)` 与全局 `set_error_handler` 排除。
+常用能力一并裁决：`flush_on(Level)` 采纳（`LoggerBase` 的阈值 setter，默认 `Off`；与 `set_level` 同属运行期可改的原子配置，因此不参与异步组件的封板——封板只管 sink 结构），同步 logger 在写出后即时 flush，异步 logger 把请求折算成一次序号屏障请求，由工作线程在该条写出后 flush sink，不阻塞生产者，也不占队列槽位；公开 `should_log(Level) const` 采纳；`set_formatter(std::unique_ptr<Formatter>)` 采纳并扇出到每个 sink（逐 sink `clone()`，这正是 `Formatter::clone()` 的用途），入参为空走 `fail_config`，`AnySink::set_formatter` 同样拒绝空值；`sinks()` 访问器采纳，返回 `std::span<AnySink>`——结构不可变、元素可配置，后续 `append_sink` 会使之失效。`flush_every(interval)` 与全局 `set_error_handler` 排除。
 
 ## Considered Options
 
