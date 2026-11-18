@@ -16,6 +16,9 @@ _Avoid_: 调用点、调用位置
 **Sink**：日志条目的输出目的地；通过 `Sink` concept 约束，决定一条已格式化的消息送往何处。
 _Avoid_: 输出器、handler、destination
 
+**Sink Set**：一个 logger 在创建期定型的 sink 集合，由 `LoggerConfig` / `AsyncLoggerConfig` 的 `sinks` 字段给出，用 `make_sinks(AnySink{...})` 拼装。创建后不可增删，只能逐 sink 改 pattern；空集合是合法状态，语义是丢弃。结构不可变由类型保证（`AnySink` 不可移动赋值）。
+_Avoid_: sink 列表、输出列表、sink 注册表
+
 **ColorMode**：Sink 对颜色的态度。`Never` 永不着色，`Always` 始终着色，`Automatic` 在配置期按输出是否连着终端定型为前两者之一。上色由 `AnySink` 执行，Sink 只用可选的 `color_mode()` 声明模式。
 _Avoid_: 彩色输出、color scheme
 
@@ -43,7 +46,7 @@ _Avoid_: 字段模板、format_info
 **PatternFlag**：调用方注册的单个 pattern flag 处理器，实现 `PatternFlag` concept，把 Message 与共享的 `std::tm` 写入输出文本。
 _Avoid_: 自定义 flag、flag handler、add_flag
 
-**Logger**：调用方记录日志时面对的模块；它持有级别与模式，并把记录交给 sink。
+**Logger**：调用方记录日志时面对的模块；它持有级别、模式与创建期定型的 Sink Set，并把记录交给 sink。
 _Avoid_: 记录器实例、log object
 
 **AsyncLogger**：把 Message 入队、由工作线程投递给 Sink 的 Logger。
@@ -64,5 +67,8 @@ _Avoid_: 自动 flush、flush 间隔
 **丢弃上报 / 覆盖上报**：非阻塞策略每丢掉一条消息就经 ErrorHandler 通知一次；组件不提供丢弃计数器。
 _Avoid_: 丢弃统计、溢出次数
 
-**Registry**：按名称管理 `Logger` 实例的集中位置，负责创建、查找与移除。
+**Registry**：按名称管理 `Logger` 实例的集中位置，负责创建、查找与移除；创建是 sink 集合的定型点。
 _Avoid_: 日志管理器、factory
+
+**Default 槽位**：Registry 中名为 `default` 的常驻条目，由 `Registry::default_logger()` 独家创建，初始 Sink Set 就是一个 `StdoutSink`；不可摘除，因为自由函数缓存了它的引用。
+_Avoid_: 全局 logger、根 logger、默认实例

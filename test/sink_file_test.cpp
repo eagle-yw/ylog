@@ -98,10 +98,12 @@ TEST(FileSinkIntegrationTest, WorksWithLoggerAndCustomFlags) {
     auto second_formatter = std::make_unique<ylog::PatternFormatter>("%x|%v");
     second_formatter->add_flag('x', Second{});
 
-    auto logger = ylog::Logger("file-integration");
-    logger.set_level(ylog::Level::Info);
-    logger.append_sink(ylog::RotatingFileSink(rotating_config), std::move(first_formatter));
-    logger.append_sink(ylog::DailyFileSink(daily_config), std::move(second_formatter));
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "file-integration",
+        .sinks = ylog::make_sinks(
+            ylog::AnySink{ylog::RotatingFileSink(rotating_config), std::move(first_formatter)},
+            ylog::AnySink{ylog::DailyFileSink(daily_config), std::move(second_formatter)}),
+    });
     logger.info({}, "msg");
     logger.flush();
 

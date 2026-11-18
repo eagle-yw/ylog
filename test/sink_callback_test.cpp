@@ -17,10 +17,13 @@ TEST(CallbackSinkTest, ReceivesTheSameLineAsOstreamSink) {
     auto config = ylog::CallbackConfig{};
     config.fn = [&from_callback](std::string_view line) { from_callback = std::string(line); };
 
-    auto logger = ylog::Logger("callback-parity");
-    logger.set_level(ylog::Level::Warning);
-    logger.append_sink(ylog::CallbackSink(config));
-    logger.append_sink(ylog::OstreamSink(ylog::OstreamConfig{.stream = &captured}));
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "callback-parity",
+        .level = ylog::Level::Warning,
+        .sinks = ylog::make_sinks(
+            ylog::AnySink{ylog::CallbackSink(config)},
+            ylog::AnySink{ylog::OstreamSink(ylog::OstreamConfig{.stream = &captured})}),
+    });
 
     logger.warning({}, "same {}", "line");
 
@@ -46,10 +49,11 @@ TEST(CallbackSinkTest, ReportsThrownCallbackOnceAndKeepsLogging) {
         reports.fetch_add(1, std::memory_order_relaxed);
     };
 
-    auto logger = ylog::Logger("callback-throws");
-    logger.set_level(ylog::Level::Info);
-    logger.append_sink(ylog::CallbackSink(config), "%v");
-    logger.append_sink(ylog::RingBufferSink(store), "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "callback-throws",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::CallbackSink(config), "%v"},
+                                  ylog::AnySink{ylog::RingBufferSink(store), "%v"}),
+    });
 
     EXPECT_NO_THROW(logger.info({}, "boom"));
     EXPECT_EQ(reports.load(), 1);

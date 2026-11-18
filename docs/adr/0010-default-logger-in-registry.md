@@ -23,3 +23,11 @@
 - 新增 `ylog:logging` 分区，`ylog.cppm` 要与其余分区一并 `export import`。
 - `drop_all()` 的注释与测试须写明「default 除外」，`drop("default")` 的返回值语义要有测试覆盖。
 - 直接 `import ylog:logger` 的调用方会丢掉默认 logger 与自由函数，须在 CHANGELOG / 迁移说明里点出。当前 `test/` 与 `example/` 均只 `import ylog`，无实际影响。
+
+## 追加：default 槽位的初始 sink 集合（ADR-0011）
+
+sink 集合改为创建期定型之后，`default_logger()` 无法再「懒创建之后再追加一个 `StdoutSink`」。因此：
+
+- `Registry::default_logger()` 成为 default 槽位的**唯一**创建路径，构造时就把 `StdoutSink` 放进初始集合；`create("default")` 转调它，并对带非空 `sinks` 的配置报错。
+- 上文「`create("default")` 天然幂等，不需要为默认名写特例」仍然成立的是身份（同一个实例），不再成立的是「`create` 路径对默认名毫无特例」：`create(LoggerConfig)` 现在要先判保留名再转调。
+- 「槽位懒创建」保留，懒创建的判定点从两个入口收成一个。

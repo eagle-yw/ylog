@@ -21,14 +21,14 @@ TEST(AsyncLoggerTest, ConfigDefaultsMatchTheSpec) {
 TEST(AsyncLoggerTest, RejectsZeroQueueCapacity) {
     auto config = ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 0};
 
-    EXPECT_THROW(ylog::AsyncLogger{config}, std::invalid_argument);
+    EXPECT_THROW(ylog::AsyncLogger{std::move(config)}, std::invalid_argument);
 }
 
 TEST(AsyncLoggerTest, RejectsUnknownOverflowPolicy) {
     auto config = ylog::AsyncLoggerConfig{.name = "async"};
     config.overflow_policy = static_cast<ylog::OverflowPolicy>(42);
 
-    EXPECT_THROW(ylog::AsyncLogger{config}, std::invalid_argument);
+    EXPECT_THROW(ylog::AsyncLogger{std::move(config)}, std::invalid_argument);
 }
 
 TEST(AsyncLoggerTest, ExposesNameAndLevel) {
@@ -53,17 +53,14 @@ TEST(AsyncLoggerTest, ShouldLogFollowsLevel) {
     EXPECT_TRUE(logger.should_log(ylog::Level::Critical));
 }
 
-TEST(AsyncLoggerTest, SinksExposeEveryAppendedSink) {
+TEST(AsyncLoggerTest, SinksAreFixedAtConstruction) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-sinks"});
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async-sinks", .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
 
-    auto initial = logger.sinks().size();
-    EXPECT_EQ(initial, 1);
-
-    logger.append_sink(view, "%v");
-    EXPECT_EQ(logger.sinks().size(), initial + 1);
-    EXPECT_EQ(logger.sinks()[initial].pattern(), "%v");
+    EXPECT_EQ(logger.sinks().size(), 1);
+    EXPECT_EQ(logger.sinks().front().pattern(), "%v");
 }
 
 TEST(AsyncLoggerTest, SinksConfigureIndividually) {
@@ -72,10 +69,11 @@ TEST(AsyncLoggerTest, SinksConfigureIndividually) {
     auto first_sink = AsyncRecordingSink{first};
     auto second_sink = AsyncRecordingSink{second};
 
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-configure"});
-    logger.append_sink(first_sink, "%v");
-    logger.append_sink(second_sink, "%v");
-    auto first_index = logger.sinks().size() - 2;
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async-configure",
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{first_sink, "%v"}, ylog::AnySink{second_sink, "%v"}),
+    });
 
     // 扇出：配置期的 set_formatter 让每个 sink 拿到独立 clone。
     logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
@@ -86,7 +84,7 @@ TEST(AsyncLoggerTest, SinksConfigureIndividually) {
     EXPECT_EQ(second_sink.snapshot().back(), "Info|shared\n");
 
     // 逐 sink 配置：sinks() 交出的元素仍可改，改一个不影响另一个。
-    logger.sinks()[first_index].set_pattern("%v");
+    logger.sinks()[0].set_pattern("%v");
     logger.info({}, "own");
     ASSERT_TRUE(wait_until([&first] {
         std::lock_guard lock(first->mutex);
@@ -104,10 +102,11 @@ TEST(AsyncLoggerTest, FlushOnFlushesWithoutAnExplicitFlush) {
     auto flushes = std::atomic<int>{0};
     auto recorded = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{recorded};
-    auto logger =
-        ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-flush-on", .queue_capacity = 8});
-    logger.append_sink(view, "%v");
-    logger.append_sink(FlushCountingSink{&flushes});
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async-flush-on",
+        .queue_capacity = 8,
+        .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"},
+                                  ylog::AnySink{FlushCountingSink{&flushes}})});
 
     // 默认 Off：消息照常投递，但日志路径一次都不 flush。
     EXPECT_EQ(logger.flush_level(), ylog::Level::Off);
@@ -128,9 +127,10 @@ TEST(AsyncLoggerTest, FlushOnDoesNotBlockTheProducer) {
     auto release = std::counting_semaphore<1>{0};
     auto producer_done = std::atomic<bool>{false};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async-flush-on-blocking", .queue_capacity = 4});
-    logger.append_sink(GatedFlushSink{&entered, &release});
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async-flush-on-blocking",
+        .queue_capacity = 4,
+        .sinks = ylog::make_sinks(ylog::AnySink{GatedFlushSink{&entered, &release}})});
     logger.flush_on(ylog::Level::Info);
 
     // 队列装得下这三条，所以生产者只可能在「等 flush」上被挡住。
@@ -156,8 +156,8 @@ TEST(AsyncLoggerTest, DeliversMessageToItsSink) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
 
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
     logger.info({}, "hello {}", 42);
 
     ASSERT_TRUE(view.wait_for(1, std::chrono::milliseconds(1000)));
@@ -171,8 +171,8 @@ TEST(AsyncLoggerTest, FiltersBelowThresholdBeforeEnqueue) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
 
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
     logger.set_level(ylog::Level::Warning);
     logger.info({}, "dropped");
     logger.warning({}, "kept");
@@ -187,8 +187,8 @@ TEST(AsyncLoggerTest, FiltersBelowThresholdBeforeEnqueue) {
 
 TEST(AsyncLoggerTest, ReturnsWithoutWaitingForSink) {
     auto gate = SinkGate{};
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-    logger.append_sink(BlockingSink{&gate}, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .sinks = ylog::make_sinks(ylog::AnySink{BlockingSink{&gate}, "%v"})});
 
     std::binary_semaphore returned{0};
     auto producer = std::jthread([&logger, &returned] {
@@ -206,8 +206,8 @@ TEST(AsyncLoggerTest, ConcurrentProducersDeliverEveryLineIntact) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
 
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
 
     constexpr int thread_count = 4;
     constexpr int per_thread = 200;
@@ -245,8 +245,9 @@ TEST(AsyncLoggerTest, DrainsQueueInOrderOnDestruction) {
     constexpr int message_count = 200;
     auto state = std::make_shared<AsyncRecordingSink::State>();
     {
-        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-        logger.append_sink(AsyncRecordingSink{state}, "%v");
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+            .name = "async",
+            .sinks = ylog::make_sinks(ylog::AnySink{AsyncRecordingSink{state}, "%v"})});
         for (int i = 0; i < message_count; ++i) {
             logger.info({}, "line-{}", i);
         }
@@ -262,8 +263,10 @@ TEST(AsyncLoggerTest, DrainsQueueInOrderOnDestruction) {
 
 TEST(AsyncLoggerTest, BlocksProducerWhenQueueIsFull) {
     auto gate = SinkGate{};
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 1});
-    logger.append_sink(BlockingSink{&gate}, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .queue_capacity = 1,
+        .sinks = ylog::make_sinks(ylog::AnySink{BlockingSink{&gate}, "%v"})});
 
     logger.info({}, "first");
     ASSERT_TRUE(gate.entered.try_acquire_for(std::chrono::milliseconds(1000)));
@@ -292,12 +295,13 @@ TEST(AsyncLoggerTest, OverrunOldestDropsOldestMessageAndReports) {
     auto entered = std::counting_semaphore<64>{0};
     auto release = std::counting_semaphore<64>{0};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async",
-                                .queue_capacity = 1,
-                                .overflow_policy = ylog::OverflowPolicy::OverrunOldest,
-                                .err_handler = reports.handler()});
-    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .queue_capacity = 1,
+        .overflow_policy = ylog::OverflowPolicy::OverrunOldest,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
 
     logger.info({}, "a");
     ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
@@ -324,12 +328,13 @@ TEST(AsyncLoggerTest, DiscardNewDropsIncomingMessageAndReports) {
     auto entered = std::counting_semaphore<64>{0};
     auto release = std::counting_semaphore<64>{0};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async",
-                                .queue_capacity = 1,
-                                .overflow_policy = ylog::OverflowPolicy::DiscardNew,
-                                .err_handler = reports.handler()});
-    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .queue_capacity = 1,
+        .overflow_policy = ylog::OverflowPolicy::DiscardNew,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
 
     logger.info({}, "a");
     ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
@@ -357,11 +362,13 @@ TEST(AsyncLoggerTest, NonBlockingPoliciesDoNotWaitForConsumer) {
         auto entered = std::counting_semaphore<64>{0};
         auto release = std::counting_semaphore<64>{0};
 
-        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async",
-                                                                .queue_capacity = 1,
-                                                                .overflow_policy = policy,
-                                                                .err_handler = reports.handler()});
-        logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+        auto logger = ylog::AsyncLogger(
+            ylog::AsyncLoggerConfig{.name = "async",
+                                    .queue_capacity = 1,
+                                    .overflow_policy = policy,
+                                    .err_handler = reports.handler(),
+                                    .sinks = ylog::make_sinks(ylog::AnySink{
+                                        GatedRecordingSink{state, &entered, &release}, "%v"})});
 
         logger.info({}, "seed");
         ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
@@ -388,12 +395,13 @@ TEST(AsyncLoggerTest, FlushDoesNotOccupyQueueCapacity) {
     auto entered = std::counting_semaphore<64>{0};
     auto release = std::counting_semaphore<64>{0};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async",
-                                .queue_capacity = 1,
-                                .overflow_policy = ylog::OverflowPolicy::DiscardNew,
-                                .err_handler = reports.handler()});
-    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .queue_capacity = 1,
+        .overflow_policy = ylog::OverflowPolicy::DiscardNew,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
 
     logger.info({}, "a");
     ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
@@ -420,8 +428,11 @@ TEST(AsyncLoggerTest, BlockPolicyReportsNothing) {
     auto release = std::counting_semaphore<64>{0};
 
     auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
-        .name = "async", .queue_capacity = 1, .err_handler = reports.handler()});
-    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+        .name = "async",
+        .queue_capacity = 1,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
 
     logger.info({}, "a");
     ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)));
@@ -439,8 +450,9 @@ TEST(AsyncLoggerTest, FlushReturnsAfterMessageIsWritten) {
     auto path = directory / "flush.log";
 
     {
-        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-        logger.append_sink(ylog::FileSink(path.string()), "%v");
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+            .name = "async",
+            .sinks = ylog::make_sinks(ylog::AnySink{ylog::FileSink(path.string()), "%v"})});
         logger.info({}, "persisted");
         logger.flush();
 
@@ -454,8 +466,8 @@ TEST(AsyncLoggerTest, FlushIsABarrierForEachProducingThread) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
 
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
 
     auto pool = std::vector<std::jthread>{};
     for (int tid = 0; tid < 4; ++tid) {
@@ -482,8 +494,9 @@ TEST(AsyncLoggerTest, StopDrainsQueueAndEveryLaterLogIsReported) {
     auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
 
     auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async", .err_handler = reports.handler()});
-    logger.append_sink(view, "%v");
+        ylog::AsyncLoggerConfig{.name = "async",
+                                .err_handler = reports.handler(),
+                                .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
     for (int i = 0; i < 100; ++i) {
         logger.info({}, "line-{}", i);
     }
@@ -512,8 +525,8 @@ TEST(AsyncLoggerTest, FlushIsABarrierForEveryCallerUnderConcurrency) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
 
-    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
 
     constexpr auto thread_count = 4;
     constexpr auto per_thread = 20;
@@ -552,8 +565,11 @@ TEST(AsyncLoggerTest, StopRejectsQueuedProducersAndLaterLogs) {
     auto entered = std::counting_semaphore<64>{0};
     auto release = std::counting_semaphore<64>{0};
     auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
-        .name = "async", .queue_capacity = 2, .err_handler = reports.handler()});
-    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+        .name = "async",
+        .queue_capacity = 2,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
 
     logger.info({}, "m0");
     ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)))
@@ -597,8 +613,9 @@ TEST(AsyncLoggerTest, FlushAfterStopStillFlushesSinks) {
     auto path = directory / "stopped.log";
 
     {
-        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-        logger.append_sink(ylog::FileSink(path.string()), "%v");
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+            .name = "async",
+            .sinks = ylog::make_sinks(ylog::AnySink{ylog::FileSink(path.string()), "%v"})});
         logger.info({}, "kept");
         logger.stop();
 
@@ -621,8 +638,9 @@ TEST(AsyncLoggerTest, ConcurrentFlushAfterStopIsSafeAndComplete) {
     auto path = directory / "stopped.log";
 
     {
-        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
-        logger.append_sink(ylog::FileSink(path.string()), "%v");
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+            .name = "async",
+            .sinks = ylog::make_sinks(ylog::AnySink{ylog::FileSink(path.string()), "%v"})});
         for (int i = 0; i < 100; ++i) {
             logger.info({}, "line-{}", i);
         }
@@ -655,10 +673,10 @@ TEST(AsyncLoggerTest, SinkFailureIsReportedAndOtherSinksKeepWorking) {
     auto view = AsyncRecordingSink{state};
     auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async", .err_handler = reports.handler()});
-    logger.append_sink(ThrowingSink{}, "%v");
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .err_handler = reports.handler(),
+        .sinks = ylog::make_sinks(ylog::AnySink{ThrowingSink{}, "%v"}, ylog::AnySink{view, "%v"})});
 
     logger.info({}, "a");
     logger.info({}, "b");
@@ -688,10 +706,10 @@ TEST(AsyncLoggerTest, SinkFailureReportsAgainAfterSuccessfulWrite) {
     auto view = AsyncRecordingSink{state};
     auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async", .err_handler = reports.handler()});
-    logger.append_sink(FlakySink{}, "%v");
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .err_handler = reports.handler(),
+        .sinks = ylog::make_sinks(ylog::AnySink{FlakySink{}, "%v"}, ylog::AnySink{view, "%v"})});
 
     // 失败 → 成功 → 失败：成功那次应解除「已上报」状态，于是第二段失败再报一次。
     logger.info({}, "a");
@@ -714,10 +732,10 @@ TEST(AsyncLoggerTest, HandlerExceptionDoesNotKillWorker) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
 
-    auto logger = ylog::AsyncLogger(
-        ylog::AsyncLoggerConfig{.name = "async", .err_handler = ThrowingHandler{}});
-    logger.append_sink(ThrowingSink{}, "%v");
-    logger.append_sink(view, "%v");
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .err_handler = ThrowingHandler{},
+        .sinks = ylog::make_sinks(ylog::AnySink{ThrowingSink{}, "%v"}, ylog::AnySink{view, "%v"})});
 
     logger.info({}, "a");
     logger.info({}, "b");

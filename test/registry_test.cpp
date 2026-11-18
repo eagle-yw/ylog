@@ -35,6 +35,19 @@ TEST(RegistryTest, DefaultLoggerIsRegistrySlot) {
     EXPECT_EQ(logger.name(), ylog::default_logger_name);
 }
 
+TEST(RegistryTest, DefaultSlotOwnsItsSinkSet) {
+    auto& registry = ylog::Registry::instance();
+
+    // 初始集合由 Registry 在创建期给定：恰好一个 StdoutSink（ADR-0011）。
+    EXPECT_EQ(ylog::default_logger().sinks().size(), 1);
+
+    // 保留名的集合不接受外部指定：给了 sink 就报错，而不是静默丢弃。
+    EXPECT_THROW(registry.create(ylog::LoggerConfig{
+                     .name = std::string(ylog::default_logger_name),
+                     .sinks = ylog::make_sinks(ylog::AnySink{ylog::NullSink{}, "%v"})}),
+                 std::invalid_argument);
+}
+
 TEST(RegistryTest, DefaultLoggerIsPermanent) {
     auto& registry = ylog::Registry::instance();
     auto* logger = &ylog::default_logger();
@@ -93,8 +106,9 @@ TEST(RegistryAsyncTest, SetLevelByNameFiltersAsyncMessages) {
     auto view = AsyncRecordingSink{state};
 
     auto& registry = ylog::Registry::instance();
-    auto& logger = registry.create_async("async-level", ylog::AsyncLoggerConfig{});
-    logger.append_sink(view, "%v");
+    auto& logger = registry.create_async(
+        "async-level",
+        ylog::AsyncLoggerConfig{.sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
 
     EXPECT_TRUE(registry.set_level("async-level", ylog::Level::Warning));
     EXPECT_FALSE(registry.set_level("missing", ylog::Level::Warning));
@@ -118,8 +132,9 @@ TEST(RegistryAsyncTest, FlushAllIsBarrierForAsyncLoggers) {
     auto path = directory / "flush.log";
 
     auto& registry = ylog::Registry::instance();
-    auto& logger = registry.create_async("async-flush-all", ylog::AsyncLoggerConfig{});
-    logger.append_sink(ylog::FileSink(path.string()), "%v");
+    auto& logger = registry.create_async(
+        "async-flush-all", ylog::AsyncLoggerConfig{.sinks = ylog::make_sinks(ylog::AnySink{
+                                                       ylog::FileSink(path.string()), "%v"})});
     logger.info({}, "persisted");
 
     registry.flush_all();
@@ -134,8 +149,9 @@ TEST(RegistryAsyncTest, DropDrainsWithoutExplicitStop) {
     auto view = AsyncRecordingSink{state};
 
     auto& registry = ylog::Registry::instance();
-    auto& logger = registry.create_async("async-drop", ylog::AsyncLoggerConfig{});
-    logger.append_sink(view, "%v");
+    auto& logger = registry.create_async(
+        "async-drop",
+        ylog::AsyncLoggerConfig{.sinks = ylog::make_sinks(ylog::AnySink{view, "%v"})});
     for (int i = 0; i < 100; ++i) {
         logger.info({}, "line-{}", i);
     }

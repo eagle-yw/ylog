@@ -139,13 +139,10 @@ int main(int argc, char* argv[]) {
         benchmark::RegisterBenchmark("disabled-at-runtime", bench_logger<ylog::Logger>, disabled)
             ->Unit(benchmark::kMicrosecond);
 
-        // 全局 logger 的两态：默认 sink 换成 NullSink，级别在循环外由被测函数设置。
-        bench::replace_default_sink(ylog::default_logger(), bench::null_sink());
+        // 全局 logger：只能测运行期关闭那一态。default 槽位的 sink 集合由
+        // Registry 定型且不可摘除，级别在循环外由被测函数设置，因此这里不写终端。
         benchmark::RegisterBenchmark("disabled-at-runtime (global logger)", bench_global_logger,
                                      ylog::Level::Off)
-            ->Unit(benchmark::kMicrosecond);
-        benchmark::RegisterBenchmark("null_sink_st (global logger)", bench_global_logger,
-                                     ylog::Level::Info)
             ->Unit(benchmark::kMicrosecond);
 
         auto* null_st = keep(owners, bench::make_logger("null_st", bench::null_sink()));

@@ -101,21 +101,22 @@ public:
         : model_(std::make_unique<Model<std::decay_t<T>>>(std::forward<T>(sink))),
           formatter_(std::move(formatter)) {}
 
+    // 一处构造 + 一个模式：取代过去 append_sink(sink, pattern) 的写法。
+    template <Sink T>
+    AnySink(T&& sink, std::string_view pattern)
+        : AnySink(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern)) {}
+
     AnySink(const AnySink&) = delete;
     auto operator=(const AnySink&) -> AnySink& = delete;
 
-    // 移动只在配置期发生（Logger 的 sinks_ 扩容），锁不参与移动。
+    // 移动只在配置期发生（构造 sink 集合时 vector 扩容），锁不参与移动。
     AnySink(AnySink&& other) noexcept
         : model_(std::move(other.model_)),
           formatter_(std::move(other.formatter_)) {}
 
-    auto operator=(AnySink&& other) noexcept -> AnySink& {
-        if (this != &other) {
-            model_ = std::move(other.model_);
-            formatter_ = std::move(other.formatter_);
-        }
-        return *this;
-    }
+    // 不提供移动赋值：sink 集合在创建期定型，结构不可变由类型保证，
+    // 而不是靠「sinks() 的调用方自觉不替换元素」这条注释。
+    auto operator=(AnySink&& other) noexcept -> AnySink& = delete;
 
     ~AnySink() = default;
 
@@ -211,22 +212,15 @@ namespace detail {
 // sink 做一次动作」。同步路径让异常照常外传；异步路径用带回调的重载把失败收敛成上报。
 //
 // 存储是两个等长向量：sinks_ 必须是 AnySink 的连续数组（sinks() 把它直接交出去），
-// 所以失败状态不能和它挤在同一个元素里。两者只在 push() 里同时增长。
+// 所以失败状态不能和它挤在同一个元素里。两者只在构造期一起定型。
 class SinkSet {
 public:
-    // 追加 sink，可为其单独指定 pattern（formatter 归属 sink）。
-    template <Sink T>
-    auto append(T&& sink, std::string_view pattern) -> void {
-        push(AnySink(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern)));
-    }
+    // 集合在创建期定型：构造后不再增删，只有元素可配置。
+    explicit SinkSet(std::vector<AnySink> sinks)
+        : sinks_(std::move(sinks)),
+          failing_(sinks_.size()) {}
 
-    // 追加 sink 并注入配置好的 formatter（可带自定义 flag）。
-    template <Sink T>
-    auto append(T&& sink, std::unique_ptr<Formatter> formatter) -> void {
-        push(AnySink(std::forward<T>(sink), std::move(formatter)));
-    }
-
-    // 结构不可变、元素可配置。之后的 append 会让底层数组重新分配，视图随即失效。
+    // 结构不可变、元素可配置。
     auto sinks() -> std::span<AnySink> { return sinks_; }
 
     // 为所有 sink 设置 pattern（扇出）。
@@ -285,16 +279,22 @@ public:
     }
 
 private:
-    // sink 与它的失败状态必须同时增长，因此只留这一个入口。
-    auto push(AnySink sink) -> void {
-        sinks_.push_back(std::move(sink));
-        failing_.emplace_back();
-    }
-
     std::vector<AnySink> sinks_;
     std::vector<ylog_detail_errors::failure_latch> failing_;  // 与 sinks_ 等长，逐 sink 的上报锁存
 };
 
 }  // namespace detail
+
+// 构造 sink 集合的唯一入口：AnySink 不可拷贝，花括号初始化式无法直接用于 vector。
+// 零 sink 不必经它：省略 sinks 字段即可（默认空）。
+export template <typename... Rest>
+auto make_sinks(AnySink first, Rest... rest) -> std::vector<AnySink> {
+    static_assert((std::same_as<Rest, AnySink> && ...), "make_sinks 只接受 AnySink");
+    auto sinks = std::vector<AnySink>{};
+    sinks.reserve(1 + sizeof...(rest));
+    sinks.push_back(std::move(first));
+    (sinks.push_back(std::move(rest)), ...);
+    return sinks;
+}
 
 }  // namespace ylog

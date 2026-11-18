@@ -7,8 +7,10 @@ import ylog;
 void demo_runtime() {
     std::println("\n== 运行期控制 ==");
 
-    auto logger = ylog::Logger("runtime");
-    logger.set_level(ylog::Level::Info);
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "runtime",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::StdoutSink{}}),
+    });
 
     // should_log 是调用方的守门函数：昂贵的参数构造与 std::format 都可以先跳过。
     if (logger.should_log(ylog::Level::Debug)) {
@@ -22,6 +24,6 @@ void demo_runtime() {
     logger.error({}, "error 触发 flush");
     std::println("flush 阈值 = {}", ylog::level_name(logger.flush_level()));
 
-    // sinks() 给出结构不可变的视图：元素可各自配置，增删仍要经 append_sink。
+    // sinks() 给出结构不可变的视图：集合在构造期定型，元素仍可各自配置。
     std::println("sink 数 = {}", logger.sinks().size());
 }

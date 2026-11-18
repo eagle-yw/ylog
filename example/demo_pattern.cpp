@@ -7,11 +7,13 @@ import ylog;
 void demo_pattern() {
     std::println("\n== 每 sink 一套 pattern ==");
 
-    auto logger = ylog::Logger("pattern");
-    logger.set_level(ylog::Level::Debug);
-
-    // 构造时已带一个 stdout sink（默认 pattern）；再追加一个只打级别与消息的。
-    logger.append_sink(ylog::StdoutSink{}, "[%L] %v");
+    // 两个 sink 各带一套 pattern：一个用默认 pattern，一个只打级别与消息。
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "pattern",
+        .level = ylog::Level::Debug,
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::StdoutSink{}},
+                                  ylog::AnySink{ylog::StdoutSink{}, "[%L] %v"}),
+    });
     logger.info({}, "同一条日志，两种格式");
 
     // set_pattern 扇出到所有 sink，覆盖它们各自的 pattern：两个 sink 各输出一行，

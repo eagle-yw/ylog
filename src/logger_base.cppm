@@ -1,8 +1,3 @@
-module;
-
-// assert 是宏，`import std;` 带不进来。
-#include <cassert>
-
 module ylog:logger.base;
 
 import std;
@@ -10,14 +5,13 @@ import :level;
 import :message;
 import :formatter;
 import :sink;
-import :sink.stdout;
 import ylog_detail_errors;
 
 namespace ylog {
 
 namespace detail {
 
-// Logger 与 AsyncLogger 的公共面：名称、级别、sink 集合与六个级别便捷方法。
+// Logger 与 AsyncLogger 的公共面：名称、级别、创建期定型的 sink 集合与六个级别便捷方法。
 // 派生类只保留差异部分（同步直写 / 异步入队），公开继承让这些成员直接长在派生类上。
 //
 // 单独占一个分区，:async 因此不必为拿它而 import :logger；ylog 模块的公开面不
@@ -34,8 +28,7 @@ public:
         return msg_level >= level_.load(std::memory_order_relaxed);
     }
 
-    // sink 集合视图：结构不可变、元素可配置（逐 sink 的 set_pattern / set_formatter）。
-    // 之后的 append_sink 会让底层数组重新分配，返回的 span 随即失效。
+    // sink 集合视图：结构在创建期定型、元素可配置（逐 sink 的 set_pattern / set_formatter）。
     auto sinks() -> std::span<AnySink> { return sinks_.sinks(); }
 
     // flush 阈值：达到该级别的消息写出后主动 flush sink，默认 Off 表示从不触发。
@@ -43,34 +36,16 @@ public:
     auto flush_on(Level target) -> void { flush_level_.store(target, std::memory_order_relaxed); }
     auto flush_level() const -> Level { return flush_level_.load(std::memory_order_relaxed); }
 
-    // 追加 sink，可为其单独指定 pattern（formatter 归属 sink）。
-    template <Sink T>
-    auto append_sink(T&& sink, std::string_view pattern = default_pattern) -> void {
-        ensure_configurable();
-        sinks_.append(std::forward<T>(sink), pattern);
-    }
-
-    // 追加 sink 并注入配置好的 formatter（可带自定义 flag）。
-    template <Sink T>
-    auto append_sink(T&& sink, std::unique_ptr<Formatter> formatter) -> void {
-        ensure_configurable();
-        sinks_.append(std::forward<T>(sink), std::move(formatter));
-    }
-
     // 为所有 sink 设置 pattern（扇出）。
-    auto set_pattern(std::string_view pattern) -> void {
-        ensure_configurable();
-        sinks_.set_pattern(pattern);
-    }
+    auto set_pattern(std::string_view pattern) -> void { sinks_.set_pattern(pattern); }
 
     // 给每个 sink 注入同一份 formatter 配置：逐 sink clone，之后各自独立演进。
-    // 空入参先判：这是调用方违约，与「组件是否已封板」无关。
+    // 空入参先判：这是调用方违约，在唯一入口处拒绝。
     auto set_formatter(std::unique_ptr<Formatter> formatter) -> void {
         if (!formatter) {
             ylog_detail_errors::fail_config<std::invalid_argument>(
                 "set_formatter 需要一个非空的 formatter");
         }
-        ensure_configurable();
         sinks_.set_formatter(*formatter);
     }
 
@@ -106,32 +81,22 @@ public:
     }
 
 protected:
-    explicit LoggerBase(std::string name, Level level)
+    // sink 集合在创建期定型：构造器之后再无增删接口，工作线程与配置期因此不必互斥。
+    LoggerBase(std::string name, Level level, std::vector<AnySink> sinks)
         : name_(std::move(name)),
-          level_(level) {
-        sinks_.append(StdoutSink{}, default_pattern);
-    }
+          level_(level),
+          sinks_(std::move(sinks)) {}
 
     // 写入路径的入口：同步直写，或异步带失败回调。
     auto sink_set() -> SinkSet& { return sinks_; }
 
-    // 配置期结束。之后 append_sink / set_pattern 属于调用方违约。
-    // 断言只是侦查手段，不是同步手段：真正违反前置条件的调用本身就是数据竞争。
-    auto seal_configuration() -> void { configurable_ = false; }
-
 private:
     auto self() -> Derived& { return static_cast<Derived&>(*this); }
-
-    // 同步组件没有并发读者，配置随时可改（从不解封）；异步组件在首个入队后封板。
-    auto ensure_configurable() const -> void {
-        assert(configurable_ && "sink 配置只在配置期可变，异步组件启动后不得变更");
-    }
 
     std::string name_;
     std::atomic<Level> level_;
     std::atomic<Level> flush_level_{Level::Off};
     SinkSet sinks_;
-    bool configurable_ = true;
 };
 
 }  // namespace detail

@@ -27,3 +27,11 @@ stdout 颜色不是「另一种 sink」，而是同一个 sink 的一种模式�
 - `Automatic` 在配置期按输出是否连着终端定型为 `Never` / `Always`，`color_mode()` 返回的是定型结果而不是 `Automatic`：热路径因此只读一个枚举，不必每条日志调用 `isatty`。定型发生在构造之后不再跟随重定向变化。
 - 上色发生在取 `output_mutex_` **之后**、`model_->write` 之前（本文最初写的是「取输出锁之前」）：此时格式化已结束、缓冲已定稿，就地插入转义不会与 formatter 锁交叉，也不必为整行再复制一份。代价是插入的 O(n) 拷贝落在输出临界区里。
 - 不提供 `flush_every` / periodic worker、全局 error handler、`hourly_file_sink`、`dup_filter` / `dist` / `msvc` / `syslog` / `android` / `osx` sink。
+
+## 追加：`sinks()` 与多目的地的写法随 ADR-0011 变更
+
+上文两处关于 `append_sink` 的表述已作废：
+
+- 「`sinks()` 返回 `std::span<AnySink>`——结构不可变、元素可配置，后续 `append_sink` 会使之失效」：`append_sink` 已删除，span 不会再失效；`AnySink` 也删掉了移动赋值，所以「结构不可变」由类型保证，而不是靠「调用方不替换元素」的约定。
+- 「需要多目的地就多 `append_sink` 一次」：现在是一次 `make_sinks(AnySink{...}, ...)`，在创建期交给 `LoggerConfig` / `AsyncLoggerConfig`。
+- 「封板只管 sink 结构」：封板机制本身（`configurable_` / `seal_configuration`）已随 sink 结构不可变化而删除。

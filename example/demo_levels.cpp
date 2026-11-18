@@ -8,8 +8,11 @@ import ylog;
 void demo_levels() {
     std::println("\n== 级别 ==");
 
-    auto logger = ylog::Logger("levels");
-    logger.set_level(ylog::Level::Trace);
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "levels",
+        .level = ylog::Level::Trace,
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::StdoutSink{}}),
+    });
 
     logger.trace({}, "trace {}", 1);
     logger.debug({}, "debug {}", 2);

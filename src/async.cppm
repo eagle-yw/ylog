@@ -28,12 +28,15 @@ export auto default_error_handler() -> ErrorHandler {
     return ylog_detail_errors::make_default_err_handler();
 }
 
+// 字段顺序即指定初始化的书写顺序：sinks 放最后，调用方按名字、队列、handler 的顺序
+// 写配置时不必回头补 sink 集合。
 export struct AsyncLoggerConfig {
-    std::string name;
+    std::string name{};  // Registry 创建时按名覆盖
     Level level = Level::Info;
     std::size_t queue_capacity = 8192;
     OverflowPolicy overflow_policy = OverflowPolicy::Block;
     ErrorHandler err_handler = default_error_handler();
+    std::vector<AnySink> sinks{};  // 默认空：零 sink 合法，语义是丢弃
 };
 
 // 异步日志组件：调用线程只做级别检查、Message 构造与入队，
@@ -41,14 +44,14 @@ export struct AsyncLoggerConfig {
 // 契约：不实现 Sink concept，也不修改 Logger；名称/级别/sink 集合与级别便捷方法
 // 来自 detail::LoggerBase，这里只追加队列与工作线程。
 //
-// sink 集合只在配置期可变：worker 在构造末尾就已启动，启动后追加 sink 会与它的遍历
-// 竞争。首个入队或 stop() 之后 append_sink/set_pattern 触发断言（调试构建）。
+// sink 集合在构造期定型，worker 启动后不存在「被追加」的可能，因此不需要封板断言；
+// set_pattern 逐 sink 加 formatter 锁，可与 worker 的遍历并存。
 // err_handler 在 worker 线程（sink 失败）与调用线程（丢弃/停止）上同步调用：worker 上
 // 的 handler 不得重入本组件的 log()/flush()/stop()，否则等的是自己。见 ADR-0003。
 export class AsyncLogger : public detail::LoggerBase<AsyncLogger> {
 public:
     explicit AsyncLogger(AsyncLoggerConfig config)
-        : LoggerBase(std::move(config.name), config.level),
+        : LoggerBase(std::move(config.name), config.level, std::move(config.sinks)),
           queue_capacity_(config.queue_capacity),
           overflow_policy_(config.overflow_policy),
           err_handler_(std::move(config.err_handler)) {
@@ -72,7 +75,6 @@ public:
         {
             std::lock_guard lock(mutex_);
             stopping_ = true;
-            seal_configuration();
         }
         worker_.request_stop();
         cv_ready_.notify_all();
@@ -226,7 +228,7 @@ private:
     }
 
     // 入队成功只在这一个地方记录，避免调用点各写一次布尔量。
-    // 调用方持有 mutex_：这里也是配置期结束的唯一起点（worker 从此可能遍历 sink）。
+    // 调用方持有 mutex_。
     auto enqueue(Message message, EnqueueOutcome& outcome) -> void {
         auto reached_flush_level = message.level() >= flush_level();
         queue_.push_back(QueuedMessage{std::move(message), next_sequence_++});
@@ -236,7 +238,6 @@ private:
             // 与 flush() 走同一套机制，因此不会改变它的屏障语义。
             flush_target_ = std::max(flush_target_, next_sequence_);
         }
-        seal_configuration();
         // 不变量：队列里只有消息，长度受容量约束，flush 不占用队列空间。
         assert(queue_.size() <= queue_capacity_);
     }

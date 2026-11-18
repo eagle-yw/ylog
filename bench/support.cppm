@@ -41,41 +41,34 @@ auto timed(std::string name, std::size_t messages, Fn&& fn) -> Measurement {
     return Measurement{.name = std::move(name), .messages = messages, .seconds = seconds};
 }
 
-// 把组件自带的 StdoutSink 换掉。日志组件构造时总会装一个 stdout sink，且没有
-// 摘除接口；不换掉它，每条日志都会额外写一遍终端——既污染输出，也让数字失去
-// 可比性。必须在首条日志之前调用（异步组件在首个入队后封板）。
-template <typename Component>
-auto replace_default_sink(Component& component, ylog::AnySink sink) -> void {
-    auto sinks = component.sinks();
-    if (!sinks.empty()) {
-        sinks.front() = std::move(sink);
-    }
-}
-
 // 最常用的替身：NullSink + 指定 pattern。
 inline auto null_sink(std::string_view pattern = "%v") -> ylog::AnySink {
     return ylog::AnySink{ylog::NullSink{}, std::make_unique<ylog::PatternFormatter>(pattern)};
 }
 
-// 同步组件工厂：构造后立刻换掉默认 sink。Logger 持原子成员，不可移动，故用 unique_ptr。
+// 同步组件工厂：sink 集合在构造期给定，组件不再自带 stdout sink。
+// Logger 持原子成员，不可移动，故用 unique_ptr。
 inline auto make_logger(std::string name, ylog::AnySink sink, ylog::Level level = ylog::Level::Info)
     -> std::unique_ptr<ylog::Logger> {
-    auto logger = std::make_unique<ylog::Logger>(std::move(name));
-    logger->set_level(level);
-    replace_default_sink(*logger, std::move(sink));
-    return logger;
+    return std::make_unique<ylog::Logger>(ylog::LoggerConfig{
+        .name = std::move(name),
+        .level = level,
+        .sinks = ylog::make_sinks(std::move(sink)),
+    });
 }
 
-// 异步组件工厂：同样先换默认 sink，再交还给调用方首条日志。
+// 异步组件工厂：同样在构造期给定 sink。
 inline auto make_async_logger(std::string name,
                               ylog::AnySink sink,
                               std::size_t queue_capacity,
                               ylog::OverflowPolicy policy = ylog::OverflowPolicy::Block)
     -> std::unique_ptr<ylog::AsyncLogger> {
-    auto logger = std::make_unique<ylog::AsyncLogger>(ylog::AsyncLoggerConfig{
-        .name = std::move(name), .queue_capacity = queue_capacity, .overflow_policy = policy});
-    replace_default_sink(*logger, std::move(sink));
-    return logger;
+    return std::make_unique<ylog::AsyncLogger>(ylog::AsyncLoggerConfig{
+        .name = std::move(name),
+        .queue_capacity = queue_capacity,
+        .overflow_policy = policy,
+        .sinks = ylog::make_sinks(std::move(sink)),
+    });
 }
 
 // 基准日志一律落在 bench_logs/ 下，避免污染源码树。

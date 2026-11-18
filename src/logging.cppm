@@ -8,13 +8,14 @@ import :registry;
 namespace ylog {
 
 // 默认 logger 就是 Registry 中名为 default 的常驻槽位，与 create("default") 得到同一个
-// 实例（ADR-0010）。引用只在此处解析一次，热路径因此仍然无锁；实例归 Registry 持有，
-// 且 drop("default") 被拒绝，所以这个引用不会悬垂。
+// 实例（ADR-0010）。槽位与它的初始 sink 集合都由 Registry::default_logger() 建立
+// （ADR-0011），本分区只缓存引用：热路径因此无锁，实例归 Registry 持有，且
+// drop("default") 被拒绝，所以这个引用不会悬垂。
 //
 // 分区名不能叫 default：它是关键字，模块分区名只接受标识符。本分区与 :logger 分开，
 // 是因为 :registry 依赖 :logger，写进 :logger 会造成分区循环。
 export auto default_logger() -> Logger& {
-    static Logger& instance = Registry::instance().create(std::string{default_logger_name});
+    static Logger& instance = Registry::instance().default_logger();
     return instance;
 }
 

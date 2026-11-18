@@ -21,30 +21,33 @@ TEST(SinkTest, FormatterSeamRejectsEmptyFormatter) {
     EXPECT_EQ(captured, "still\n");
 }
 
-TEST(GenericSinkTest, FanOutKeepsAppendSinkOrder) {
+TEST(GenericSinkTest, FanOutKeepsConfiguredSinkOrder) {
     auto order = std::string{};
     auto store = ylog::RingBufferStore(4);
-    auto logger = ylog::Logger("fan-out");
-    logger.set_level(ylog::Level::Info);
 
     auto first = ylog::CallbackConfig{};
     first.fn = [&order](std::string_view) { order += "first;"; };
     auto second = ylog::CallbackConfig{};
     second.fn = [&order](std::string_view) { order += "second;"; };
 
-    logger.append_sink(ylog::CallbackSink(first), "%v");
-    logger.append_sink(ylog::RingBufferSink(store), "%v");
-    logger.append_sink(ylog::CallbackSink(second), "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "fan-out",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::CallbackSink(first), "%v"},
+                                  ylog::AnySink{ylog::RingBufferSink(store), "%v"},
+                                  ylog::AnySink{ylog::CallbackSink(second), "%v"}),
+    });
 
-    // 默认的 StdoutSink 仍在扇出里：新 sink 与它并存，各自都收到同一行。
-    auto to_stdout = std::ostringstream{};
-    auto* original = std::cout.rdbuf(to_stdout.rdbuf());
     logger.info({}, "msg");
-    std::cout.rdbuf(original);
 
     EXPECT_EQ(order, "first;second;");
     EXPECT_EQ(store.last(1), std::vector<std::string>{"msg\n"});
-    EXPECT_TRUE(to_stdout.str().ends_with("msg\n")) << to_stdout.str();
+}
+
+TEST(SinkTest, SinkSetIsStructurallyImmutable) {
+    // 「结构不可变」由类型保证：可移动构造（vector 扩容需要），不可移动赋值（sinks()
+    // 只能配置元素）。
+    static_assert(std::is_move_constructible_v<ylog::AnySink>);
+    static_assert(!std::is_move_assignable_v<ylog::AnySink>);
 }
 
 TEST(SinkTest, ConceptCheck) {
@@ -81,10 +84,11 @@ TEST(SinkTest, NullSinkWritesNothingAnywhere) {
 
 TEST(SinkTest, NullSinkDoesNotChangeOtherLoggerBehaviour) {
     auto output = std::string{};
-    auto logger = ylog::Logger("null-sink");
-    logger.set_level(ylog::Level::Info);
-    logger.append_sink(ylog::NullSink{}, "%v");
-    logger.append_sink(CaptureSink{&output}, "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "null-sink",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::NullSink{}, "%v"},
+                                  ylog::AnySink{CaptureSink{&output}, "%v"}),
+    });
 
     logger.debug({}, "filtered");
     logger.info({}, "kept");

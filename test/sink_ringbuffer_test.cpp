@@ -73,9 +73,10 @@ TEST(RingBufferSinkTest, PushesFormattedLinesIntoTheStore) {
     static_assert(ylog::Sink<ylog::RingBufferSink>);
 
     auto store = ylog::RingBufferStore(4);
-    auto logger = ylog::Logger("ring-buffer");
-    logger.set_level(ylog::Level::Info);
-    logger.append_sink(ylog::RingBufferSink(store), "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "ring-buffer",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::RingBufferSink(store), "%v"}),
+    });
 
     logger.info({}, "one");
     logger.info({}, "two");

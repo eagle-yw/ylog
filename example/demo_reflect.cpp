@@ -16,7 +16,10 @@ struct Point {
 void demo_reflect() {
     std::println("\n== 结构化日志 ==");
 
-    auto logger = ylog::Logger("reflect");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "reflect",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::StdoutSink{}}),
+    });
     const auto point = Point{10, 20.1};
 
     logger.info({}, "{}", ylog::reflected(point));

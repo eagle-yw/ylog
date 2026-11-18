@@ -254,23 +254,26 @@ TEST(FormatterTest, UnknownFlagRemainsLiteral) {
 }
 
 TEST(FormatterTest, PatternFlags) {
-    auto logger = ylog::Logger("flags");
-    logger.set_level(ylog::Level::Info);
-    std::string out;
+    auto out = std::string{};
     // 只用已知 flag: %L(短级别) %n(名称) %v(payload) %%(字面百分号)
-    logger.append_sink(CaptureSink{&out}, "[%L] %n: %v 100%%");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "flags",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&out}, "[%L] %n: %v 100%%"}),
+    });
     logger.info({}, "hello");
 
     EXPECT_EQ(out, "[I] flags: hello 100%\n");
 }
 
 TEST(FormatterTest, PerSinkPattern) {
-    auto logger = ylog::Logger("multi");
-    logger.set_level(ylog::Level::Info);
-    std::string short_out, long_out;
+    auto short_out = std::string{};
+    auto long_out = std::string{};
     // 两个 sink 使用不同 pattern —— 移植自 spdlog 的核心设计
-    logger.append_sink(CaptureSink{&short_out}, "%v");
-    logger.append_sink(CaptureSink{&long_out}, "[%L] %v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "multi",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&short_out}, "%v"},
+                                  ylog::AnySink{CaptureSink{&long_out}, "[%L] %v"}),
+    });
     logger.info({}, "same message");
 
     EXPECT_EQ(short_out, "same message\n");
@@ -278,11 +281,13 @@ TEST(FormatterTest, PerSinkPattern) {
 }
 
 TEST(FormatterTest, SetPatternFanout) {
-    auto logger = ylog::Logger("fanout");
-    logger.set_level(ylog::Level::Info);
-    std::string a, b;
-    logger.append_sink(CaptureSink{&a}, "%v");
-    logger.append_sink(CaptureSink{&b}, "%v");
+    auto a = std::string{};
+    auto b = std::string{};
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "fanout",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&a}, "%v"},
+                                  ylog::AnySink{CaptureSink{&b}, "%v"}),
+    });
     logger.set_pattern("<%L:%v>");
     logger.warning({}, "changed");
 
@@ -307,11 +312,13 @@ TEST(FormatterTest, PerSinkCustomFlagRegistrations) {
     auto second = std::make_unique<ylog::PatternFormatter>("%x");
     second->add_flag('x', Second{});
 
-    auto logger = ylog::Logger("custom-sinks");
-    logger.set_level(ylog::Level::Info);
-    std::string a, b;
-    logger.append_sink(CaptureSink{&a}, std::move(first));
-    logger.append_sink(CaptureSink{&b}, std::move(second));
+    auto a = std::string{};
+    auto b = std::string{};
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "custom-sinks",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&a}, std::move(first)},
+                                  ylog::AnySink{CaptureSink{&b}, std::move(second)}),
+    });
     logger.info({}, "msg");
 
     EXPECT_EQ(a, "FIRST\n");
@@ -330,11 +337,13 @@ TEST(FormatterTest, SetPatternFanoutPreservesCustomFlags) {
     auto second = std::make_unique<ylog::PatternFormatter>("%x");
     second->add_flag('x', Marker{});
 
-    auto logger = ylog::Logger("fanout-custom");
-    logger.set_level(ylog::Level::Info);
-    std::string a, b;
-    logger.append_sink(CaptureSink{&a}, std::move(first));
-    logger.append_sink(CaptureSink{&b}, std::move(second));
+    auto a = std::string{};
+    auto b = std::string{};
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "fanout-custom",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&a}, std::move(first)},
+                                  ylog::AnySink{CaptureSink{&b}, std::move(second)}),
+    });
     logger.set_pattern("[%x]");
     logger.info({}, "msg");
 

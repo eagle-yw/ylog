@@ -120,15 +120,14 @@ auto logger_public_surface_behaves() -> void {
     auto second = std::string{};
     auto flushes = std::make_shared<std::atomic<int>>(0);
 
-    auto logger = ylog::Logger("noexc-surface");
-    logger.set_level(ylog::Level::Info);
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "noexc-surface",
+        .sinks = ylog::make_sinks(ylog::AnySink{Capture{&first}}, ylog::AnySink{Capture{&second}},
+                                  ylog::AnySink{CountingFlushSink{flushes}}),
+    });
     check(!logger.should_log(ylog::Level::Debug), "should_log rejects below the level");
     check(logger.should_log(ylog::Level::Info), "should_log accepts at the level");
-
-    logger.append_sink(Capture{&first});
-    logger.append_sink(Capture{&second});
-    logger.append_sink(CountingFlushSink{flushes});
-    check(logger.sinks().size() == 4, "sinks() sees the default sink plus the appended ones");
+    check(logger.sinks().size() == 3, "sinks() sees exactly the configured sinks");
 
     logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
     logger.info({}, "hello");
@@ -152,10 +151,11 @@ auto generic_sinks_behave() -> void {
     auto config = ylog::CallbackConfig{};
     config.fn = [&seen](std::string_view line) { seen += line; };
 
-    auto logger = ylog::Logger("noexc-generic");
-    logger.set_level(ylog::Level::Info);
-    logger.append_sink(ylog::CallbackSink(config), "%v");
-    logger.append_sink(ylog::RingBufferSink(store), "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "noexc-generic",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::CallbackSink(config), "%v"},
+                                  ylog::AnySink{ylog::RingBufferSink(store), "%v"}),
+    });
     logger.info({}, "generic");
     logger.flush();
 
@@ -243,8 +243,8 @@ auto smoke_concurrent_producers(ylog::OverflowPolicy policy, std::string_view la
         .queue_capacity = 16,
         .overflow_policy = policy,
         .err_handler = reports.handler(),
+        .sinks = ylog::make_sinks(ylog::AnySink{MeasuredSink{state}, "%v"}),
     });
-    logger.append_sink(MeasuredSink{state}, "%v");
 
     auto producers = std::vector<std::jthread>{};
     for (int producer = 0; producer < producer_count; ++producer) {
@@ -310,9 +310,9 @@ auto async_survives_sink_write_failure() -> void {
     auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
         .name = "async-sink-failure",
         .err_handler = logger_reports.handler(),
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::RotatingFileSink(sink_config), "%v"},
+                                  ylog::AnySink{MeasuredSink{state}, "%v"}),
     });
-    logger.append_sink(ylog::RotatingFileSink(sink_config), "%v");
-    logger.append_sink(MeasuredSink{state}, "%v");
 
     logger.info({}, "0-0");
     logger.info({}, "0-1");
@@ -327,11 +327,11 @@ auto async_survives_sink_write_failure() -> void {
 }  // namespace
 
 auto main() -> int {
-    auto logger = ylog::Logger("noexc");
-    logger.set_level(ylog::Level::Info);
-
     auto out = std::string{};
-    logger.append_sink(Capture{&out}, "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "noexc",
+        .sinks = ylog::make_sinks(ylog::AnySink{Capture{&out}, "%v"}),
+    });
     logger.info({}, "hello {}", 42);
     check(out == "hello 42\n", "info message reaches sink");
 
@@ -392,8 +392,10 @@ auto main() -> int {
     // 异步基础路径：构造 → 记录 → flush，flush 返回时行必须已落盘。
     auto async_state = std::make_shared<MeasuredSink::State>();
     {
-        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "noexc-async-direct"});
-        logger.append_sink(MeasuredSink{async_state}, "%v");
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+            .name = "noexc-async-direct",
+            .sinks = ylog::make_sinks(ylog::AnySink{MeasuredSink{async_state}, "%v"}),
+        });
         logger.info({}, "0-0");
         logger.info({}, "0-1");
         logger.flush();

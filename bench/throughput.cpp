@@ -3,9 +3,8 @@
 // 单线程与多线程下各类 sink 的消息吞吐（条/秒）。用法：
 //   bench_throughput [迭代数] [线程数]
 //
-// 与 spdlog 的差异：spdlog 的 logger 可以只挂一个 null sink，ylog 的组件构造时
-// 自带 StdoutSink 且没有摘除接口，所以这里统一换成待测 sink（见
-// bench::replace_default_sink）。backtrace 场景 ylog 没有提供，不设。
+// 与 spdlog 的差异：ylog 的组件在构造期接管 sink 集合，因此这里直接把待测 sink
+// 传进去，构造后不再有默认 stdout sink 需要摘除。backtrace 场景 ylog 没有提供，不设。
 
 import std;
 import ylog;

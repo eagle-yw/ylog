@@ -2,10 +2,11 @@ export module ylog:registry;
 
 import std;
 import :level;
-import :logger;
-import :async;
+import :formatter;
 import :sink;
 import :sink.stdout;
+import :logger;
+import :async;
 import ylog_detail_errors;
 
 namespace ylog {
@@ -14,16 +15,21 @@ namespace ylog {
 //
 // 命名规则（设计记录见 docs/adr/0007-registry-namespace-and-ownership.md）：
 // - 一个名字只能属于一个组件；
-// - create() 对同名同步 logger 幂等，撞上异步组件抛 std::invalid_argument；
-// - create_async() 撞上任何已用名字都抛 std::invalid_argument；
+// - create() 对同名同步 logger 幂等（返回既有实例，忽略新给的配置），撞上异步组件抛；
+// - create_async() 撞上任何已用名字都抛；
 // - get()/get_async() 按类型查找，名字属于另一类时返回 nullptr。
+//
+// sink 集合在创建期定型（ADR-0011）：create 收完整的 LoggerConfig，之后只可逐 sink
+// 改 pattern。集合为空合法，语义是丢弃。
 //
 // 所有权：Registry 是唯一持有者。drop()/drop_all() 先摘除、再在锁外析构，所以异步
 // 组件的排空发生在 drop() 返回之前——不存在「最后一个外部持有者析构才停机」的模型。
 //
 // 并发契约：创建/摘除/配置属配置期操作；flush_all() 先取快照再逐个 flush，避免持锁
 // 等待异步组件的屏障。
-// 默认 logger 的保留名：由 :default 的 default_logger() 懒创建，且不可摘除（ADR-0010）。
+//
+// 默认 logger 的保留名：由 Registry::default_logger() 创建（唯一的创建路径），且不可
+// 摘除（ADR-0010）。
 export inline constexpr std::string_view default_logger_name = "default";
 
 export class Registry {
@@ -34,20 +40,54 @@ public:
     }
 
     // 创建并注册同步 logger。同名同步 logger 已存在则返回既有实例（幂等）。
-    auto create(std::string name) -> Logger& {
+    auto create(LoggerConfig config) -> Logger& {
+        if (config.name == default_logger_name) {
+            // 保留名只有一个创建路径；初始集合由 default_logger() 决定，外部指定即违约。
+            if (!config.sinks.empty()) {
+                ylog_detail_errors::fail_config<std::invalid_argument>(
+                    "default 的 sink 集合由 default_logger() 定型，不能经 create 指定");
+            }
+            return default_logger();
+        }
         std::lock_guard lock(mutex_);
-        auto it = entries_.find(name);
+        auto it = entries_.find(config.name);
         if (it == entries_.end()) {
-            it = entries_.try_emplace(name).first;
+            it = entries_.try_emplace(config.name).first;
         } else if (it->second.asynchronous) {
             ylog_detail_errors::fail_config<std::invalid_argument>(
-                std::format("logger 名称已被异步组件占用: {}", name));
+                std::format("logger 名称已被异步组件占用: {}", config.name));
         }
         auto& entry = it->second;
         if (!entry.synchronous) {
-            entry.synchronous = std::make_unique<Logger>(name);
+            entry.synchronous = std::make_unique<Logger>(std::move(config));
         }
         return *entry.synchronous;
+    }
+
+    // 便利面：零 sink 的同步 logger（语义是丢弃）。要 sink 就显式给 LoggerConfig。
+    auto create(std::string name) -> Logger& {
+        return create(LoggerConfig{.name = std::move(name)});
+    }
+
+    // 默认 logger：唯一创建路径，初始 sink 集合就是一个 StdoutSink。
+    // 因此 default_logger() 与 create("default") 得到同一个实例，且不论谁先调用。
+    auto default_logger() -> Logger& {
+        std::lock_guard lock(mutex_);
+        auto it = entries_.find(std::string(default_logger_name));
+        if (it != entries_.end()) {
+            if (!it->second.synchronous) {
+                ylog_detail_errors::fail_config<std::invalid_argument>(
+                    "default 槽位已被异步组件占用");
+            }
+            return *it->second.synchronous;
+        }
+        auto created = std::make_unique<Logger>(
+            LoggerConfig{.name = std::string(default_logger_name),
+                         .sinks = make_sinks(AnySink{StdoutSink{}, default_pattern})});
+        auto& reference = *created;
+        entries_.try_emplace(std::string(default_logger_name)).first->second.synchronous =
+            std::move(created);
+        return reference;
     }
 
     // 创建异步组件。名称已被任何组件占用时抛 std::invalid_argument。

@@ -11,3 +11,7 @@ Ylog 开放 flag 粒度的扩展，但注册点只在 `ylog:formatter` 的 `Patt
 ## 与既有 ADR 的关系
 
 ADR-0003 中“`Logger` 保持不变”限定于异步路径：异步不侵入 Logger。本决策只增加一个 formatter 注入重载，不引入队列、线程或调度，不重开异步接缝。
+
+## 追加：formatter 注入点随 ADR-0011 迁移
+
+上文「`Logger` 增加接受 `unique_ptr<Formatter>` 的 `append_sink` 重载」已随 ADR-0011 消失：sink 集合改为创建期定型后，注入配置好的 formatter 写成 `AnySink{sink, std::unique_ptr<Formatter>}`，再由 `make_sinks` 装进 `LoggerConfig::sinks`。`AnySink::set_pattern` 的委托语义与「formatter 归属 sink」不变。

@@ -45,11 +45,16 @@ import std;
 import ylog;
 
 int main() {
-    auto logger = ylog::Logger("app");
-    logger.info({}, "hello, {}", "ylog");
-
-    // 自由函数作用于默认 logger：Registry 中名为 default 的常驻槽位（ADR-0010）
+    // 自由函数作用于默认 logger：Registry 中名为 default 的常驻槽位（ADR-0010），
+    // 它自带一个 StdoutSink（ADR-0011）。
     ylog::info({}, "no logger object needed");
+
+    // 自己建 logger 时，sink 集合在创建期一次给定，之后只可逐 sink 改 pattern。
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "app",
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::StdoutSink{}, "%v"}),
+    });
+    logger.info({}, "hello, {}", "ylog");
 }
 ```
 
@@ -122,9 +127,9 @@ cmake --build --preset gcc16-bench --target bench_throughput bench_async bench_l
 | `bench_async` | `async_bench.cpp` | 异步入队吞吐，并校验溢出策略（Block 必须一条不丢）|
 
 Google Benchmark 优先取系统包，缺失时由 FetchContent 拉 v1.9.1。两处刻意差异：
-ylog 没有 backtrace 与编译期关闭的宏，相应场景缺省；组件的默认 `StdoutSink` 没有
-摘除接口，基准统一把它换成待测 sink（`bench::replace_default_sink`），否则每条日志
-都会额外写一遍终端。日志文件落在**当前工作目录**的 `bench_logs/`。
+ylog 没有 backtrace 与编译期关闭的宏，相应场景缺省；组件的 sink 集合在创建期定型，
+基准因此把待测 sink 直接传进 `LoggerConfig` / `AsyncLoggerConfig`，不存在「先装一个
+默认 sink 再换掉」这一步。日志文件落在**当前工作目录**的 `bench_logs/`。
 
 ## 覆盖率
 

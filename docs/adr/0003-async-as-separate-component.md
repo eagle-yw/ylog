@@ -35,3 +35,9 @@ handler 总是在某个线程上同步调用：丢弃/停止上报发生在调�
 - 实现 `Sink` concept 的队列装饰器：改动最小，但 `AnySink` 在调用线程已完成格式化，Message 元数据在到达异步层前被消费，下游无法按级别或源位置决策。
 - `Logger` 内部可选队列：热路径增加分支，并把调度塞进日志入口，违背"不修改 Logger"的接缝约束。
 - 全局共享线程池：与 spdlog 行为最贴近，但会把 Registry 从"按名称管理 Logger"撑成调度资源管理器，并引入 shutdown 顺序问题；每组件独占线程把生命周期局部化。
+
+## 追加：sink 集合改为创建期定型（ADR-0011）
+
+上面「`append_sink` / `set_pattern` 只在配置期合法」一条只对 `set_pattern` 仍然成立，且它现在是安全的：formatter 归属 sink，`set_pattern` 逐 sink 取 `formatter_mutex_`，与 worker 的遍历并存。
+
+`append_sink` 已随 ADR-0011 删除：sink 集合在构造期由 `AsyncLoggerConfig::sinks` 一次给定，worker 启动之后不存在「被追加」的可能，`configurable_` / `ensure_configurable()` / `seal_configuration()` 一并消失。因此原文末句「若将来需要运行期热插拔 sink」不必再解：能力本身不再提供。

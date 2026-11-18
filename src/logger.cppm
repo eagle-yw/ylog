@@ -3,16 +3,25 @@ export module ylog:logger;
 import std;
 import :level;
 import :message;
+import :sink;
 import :logger.base;
 
 namespace ylog {
+
+// 创建期输入：sink 集合在这里定型，之后只可逐 sink 改 pattern，不可增删。
+// 集合为空是合法状态，语义等同于丢弃（与 NullSink 一致）。
+export struct LoggerConfig {
+    std::string name{};
+    Level level = Level::Info;
+    std::vector<AnySink> sinks{};  // 默认空：零 sink 合法，语义是丢弃
+};
 
 // 同步日志组件：log() 在调用线程直接格式化并扇出到 sink。
 // 名称、级别、sink 集合与级别便捷方法都在 detail::LoggerBase 里，这里只留差异。
 export class Logger : public detail::LoggerBase<Logger> {
 public:
-    explicit Logger(std::string name)
-        : LoggerBase(std::move(name), Level::Info) {}
+    explicit Logger(LoggerConfig config)
+        : LoggerBase(std::move(config.name), config.level, std::move(config.sinks)) {}
 
     auto flush() -> void { sink_set().flush(); }
 

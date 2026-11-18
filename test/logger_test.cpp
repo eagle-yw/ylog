@@ -40,15 +40,15 @@ TEST(LoggerTest, ReflectedFromReflection) {
 
 TEST(LoggerTest, ReflectedInLogger) {
     auto oss = std::ostringstream();
-    auto* original = std::cout.rdbuf();
-    std::cout.rdbuf(oss.rdbuf());
-
-    auto logger = ylog::Logger("struct-test");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "struct-test",
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{ylog::OstreamSink{ylog::OstreamConfig{.stream = &oss}}}),
+    });
     logger.set_level(ylog::Level::Info);
     auto point = Point{3, 4.0};
     logger.info({}, "{}", ylog::reflected(point));
 
-    std::cout.rdbuf(original);
     EXPECT_TRUE(oss.str().contains("x=3 y=4"));
 }
 
@@ -83,24 +83,34 @@ TEST(LoggerTest, DefaultLogger) {
     std::cout.rdbuf(original_buffer);
 }
 
-TEST(LoggerTest, AppendSink) {
-    auto logger = ylog::Logger("test");
-    logger.set_level(ylog::Level::Debug);
-
+TEST(LoggerTest, ConfiguredSinkReceivesLines) {
     struct TestSink {
         std::string* output;
         auto write(std::string_view msg) -> void { *output += msg; }
     };
 
-    std::string output;
-    logger.append_sink(TestSink{&output});
-    logger.debug({}, "append sink test {}", 42);
+    auto output = std::string{};
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "test",
+        .level = ylog::Level::Debug,
+        .sinks = ylog::make_sinks(ylog::AnySink{TestSink{&output}}),
+    });
+    logger.debug({}, "configured sink test {}", 42);
 
-    EXPECT_TRUE(output.ends_with("append sink test 42\n"));
+    EXPECT_TRUE(output.ends_with("configured sink test 42\n"));
+}
+
+TEST(LoggerTest, ZeroSinksDiscardsMessages) {
+    // 零 sink 是合法状态：没有目的地，flush 也不因此失败。
+    auto logger = ylog::Logger(ylog::LoggerConfig{.name = "no-sinks"});
+    EXPECT_TRUE(logger.sinks().empty());
+
+    EXPECT_NO_THROW(logger.info({}, "dropped"));
+    EXPECT_NO_THROW(logger.flush());
 }
 
 TEST(LoggerTest, ShouldLogFollowsLevel) {
-    auto logger = ylog::Logger("should-log");
+    auto logger = ylog::Logger(ylog::LoggerConfig{.name = "should-log"});
 
     EXPECT_EQ(logger.level(), ylog::Level::Info);
     EXPECT_FALSE(logger.should_log(ylog::Level::Debug));
@@ -115,23 +125,21 @@ TEST(LoggerTest, ShouldLogFollowsLevel) {
     EXPECT_FALSE(logger.should_log(ylog::Level::Critical));
 }
 
-TEST(LoggerTest, SinksExposeEveryAppendedSink) {
+TEST(LoggerTest, SinksAreFixedAtConstruction) {
     auto first = std::string{};
     auto second = std::string{};
-    auto logger = ylog::Logger("sinks");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "sinks",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&first}, "%v"},
+                                  ylog::AnySink{CaptureSink{&second}, "%v"}),
+    });
     logger.set_level(ylog::Level::Info);
 
-    // Logger 构造时已经装好一个默认 StdoutSink。
-    auto initial = logger.sinks().size();
-    EXPECT_EQ(initial, 1);
-
-    logger.append_sink(CaptureSink{&first}, "%v");
-    logger.append_sink(CaptureSink{&second}, "%v");
-    EXPECT_EQ(logger.sinks().size(), initial + 2);
+    EXPECT_EQ(logger.sinks().size(), 2);
 
     // 元素可配置：单个 sink 的 pattern 只影响自己。
-    logger.sinks()[initial].set_pattern("%l: %v");
-    logger.sinks()[initial + 1].set_pattern("[%v]");
+    logger.sinks()[0].set_pattern("%l: %v");
+    logger.sinks()[1].set_pattern("[%v]");
 
     logger.info({}, "hello");
     logger.flush();
@@ -143,11 +151,12 @@ TEST(LoggerTest, SinksExposeEveryAppendedSink) {
 TEST(LoggerTest, SetFormatterFansOutToEverySink) {
     auto first = std::string{};
     auto second = std::string{};
-    auto logger = ylog::Logger("set-formatter");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "set-formatter",
+        .sinks = ylog::make_sinks(ylog::AnySink{CaptureSink{&first}},
+                                  ylog::AnySink{CaptureSink{&second}}),
+    });
     logger.set_level(ylog::Level::Info);
-    logger.append_sink(CaptureSink{&first});
-    logger.append_sink(CaptureSink{&second});
-    auto first_index = logger.sinks().size() - 2;
 
     logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
     logger.info({}, "hello");
@@ -155,23 +164,25 @@ TEST(LoggerTest, SetFormatterFansOutToEverySink) {
     EXPECT_EQ(second, "Info|hello\n");
 
     // formatter 归属 sink：扇出的是各自的 clone，改一个不影响另一个。
-    logger.sinks()[first_index].set_pattern("%v");
+    logger.sinks()[0].set_pattern("%v");
     logger.info({}, "again");
     EXPECT_EQ(first, "Info|hello\nagain\n");
     EXPECT_EQ(second, "Info|hello\nInfo|again\n");
 }
 
 TEST(LoggerTest, SetFormatterRejectsEmptyFormatter) {
-    auto logger = ylog::Logger("empty-formatter");
+    auto logger = ylog::Logger(ylog::LoggerConfig{.name = "empty-formatter"});
 
     EXPECT_THROW(logger.set_formatter(nullptr), std::invalid_argument);
 }
 
 TEST(LoggerTest, FlushOnTriggersOnlyForConfiguredLevels) {
     auto flushes = std::atomic<int>{0};
-    auto logger = ylog::Logger("flush-on");
-    logger.set_level(ylog::Level::Trace);
-    logger.append_sink(FlushCountingSink{&flushes});
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "flush-on",
+        .level = ylog::Level::Trace,
+        .sinks = ylog::make_sinks(ylog::AnySink{FlushCountingSink{&flushes}}),
+    });
 
     // 默认 Off：日志路径一次都不 flush。
     EXPECT_EQ(logger.flush_level(), ylog::Level::Off);
@@ -203,10 +214,13 @@ TEST(LoggerTest, SetPatternRejectsNonPatternFormatter) {
         auto pattern() const -> std::string_view override { return ""; }
     };
 
-    auto logger = ylog::Logger("plain-formatter");
+    auto out = std::string{};
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "plain-formatter",
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{CaptureSink{&out}, std::make_unique<PlainFormatter>()}),
+    });
     logger.set_level(ylog::Level::Info);
-    std::string out;
-    logger.append_sink(CaptureSink{&out}, std::make_unique<PlainFormatter>());
 
     EXPECT_THROW(logger.set_pattern("%v"), std::invalid_argument);
     logger.info({}, "msg");
@@ -218,9 +232,11 @@ TEST(LoggerTest, FileSink) {
     std::filesystem::create_directories(directory);
     auto path = directory / "sink.log";
 
-    auto logger = ylog::Logger("file-test");
-    logger.set_level(ylog::Level::Debug);
-    logger.append_sink(ylog::FileSink(path.string()), "%v");
+    auto logger = ylog::Logger(ylog::LoggerConfig{
+        .name = "file-test",
+        .level = ylog::Level::Debug,
+        .sinks = ylog::make_sinks(ylog::AnySink{ylog::FileSink(path.string()), "%v"}),
+    });
 
     logger.debug({}, "debug line");
     logger.info({}, "info line");
