@@ -34,14 +34,37 @@ inline auto localtime_threadsafe(std::time_t seconds) -> std::tm {
     return result;
 }
 
+// 整数直接写成数字字符。std::to_string 每调用一次分配一份字符串，而一条带时间的
+// pattern 要为 %m/%d/%H/%S… 各调用一次，分配成本占了字段耗时的大头（基准里
+// %m 从 4ns 量级掉到几十 ns 就是这个原因，对比 spdlog 的 append_int）。
 template <typename T>
 inline auto append_int(std::string& dest, T value) -> void {
-    dest.append(std::to_string(value));
+    static_assert(std::is_integral_v<T>, "append_int 只接受整数类型");
+    auto magnitude = static_cast<std::uint64_t>(value);
+    if constexpr (std::is_signed_v<T>) {
+        if (value < 0) {
+            dest.push_back('-');
+            magnitude = 0 - magnitude;  // 取绝对值；对 INT64_MIN 也成立
+        }
+    }
+    auto digits_start = dest.size();
+    do {
+        dest.push_back(static_cast<char>('0' + magnitude % 10));
+        magnitude /= 10;
+    } while (magnitude != 0);
+    std::reverse(dest.begin() + static_cast<std::ptrdiff_t>(digits_start), dest.end());
 }
 
-// 定宽补零，用于 %m/%d/%H 等两位字段。
+// 定宽补零，用于 %m/%d/%H 等两位字段与 %e/%f/%F 的小数位。
+// 零补在符号之前，与 std::format("{:0>N}") 同语义；调用点的取值本应非负，
+// 负值分支只是不让行为无声改变。
 inline auto append_zero_padded(std::string& dest, std::int64_t value, int width) -> void {
-    dest.append(std::format("{:0>{}}", value, width));
+    auto start = dest.size();
+    append_int(dest, value);
+    auto written = static_cast<int>(dest.size() - start);
+    if (written < width) {
+        dest.insert(start, static_cast<std::size_t>(width - written), '0');
+    }
 }
 
 // 秒以下部分（纳秒），%e/%f/%F 与 %+ 共用；与 spdlog 的 time_fraction 同义。
@@ -327,7 +350,13 @@ private:
         dest.append(short_month(time));
         dest.push_back(' ');
         append_int(dest, time.tm_mday);
-        dest.append(std::format(" {:02}:{:02}:{:02} ", time.tm_hour, time.tm_min, time.tm_sec));
+        dest.push_back(' ');
+        append_zero_padded(dest, time.tm_hour, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_min, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_sec, 2);
+        dest.push_back(' ');
         append_int(dest, time.tm_year + 1900);
     }
 };
@@ -341,8 +370,11 @@ public:
 private:
     auto format_value(const Message&, const std::tm& time, std::string& dest) const
         -> void override {
-        dest.append(
-            std::format("{:02}/{:02}/{:02}", time.tm_mon + 1, time.tm_mday, time.tm_year % 100));
+        append_zero_padded(dest, time.tm_mon + 1, 2);
+        dest.push_back('/');
+        append_zero_padded(dest, time.tm_mday, 2);
+        dest.push_back('/');
+        append_zero_padded(dest, time.tm_year % 100, 2);
     }
 };
 
@@ -368,8 +400,13 @@ public:
 private:
     auto format_value(const Message&, const std::tm& time, std::string& dest) const
         -> void override {
-        dest.append(
-            std::format("{:02}:{:02}:{:02} {}", to12h(time), time.tm_min, time.tm_sec, ampm(time)));
+        append_zero_padded(dest, to12h(time), 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_min, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_sec, 2);
+        dest.push_back(' ');
+        dest.append(ampm(time));
     }
 };
 
@@ -382,7 +419,9 @@ public:
 private:
     auto format_value(const Message&, const std::tm& time, std::string& dest) const
         -> void override {
-        dest.append(std::format("{:02}:{:02}", time.tm_hour, time.tm_min));
+        append_zero_padded(dest, time.tm_hour, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_min, 2);
     }
 };
 
@@ -395,7 +434,11 @@ public:
 private:
     auto format_value(const Message&, const std::tm& time, std::string& dest) const
         -> void override {
-        dest.append(std::format("{:02}:{:02}:{:02}", time.tm_hour, time.tm_min, time.tm_sec));
+        append_zero_padded(dest, time.tm_hour, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_min, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_sec, 2);
     }
 };
 
@@ -414,7 +457,9 @@ private:
             total_minutes = -total_minutes;
         }
         dest.push_back(negative ? '-' : '+');
-        dest.append(std::format("{:02}:{:02}", total_minutes / 60, total_minutes % 60));
+        append_zero_padded(dest, total_minutes / 60, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, total_minutes % 60, 2);
     }
 };
 
@@ -571,7 +616,7 @@ private:
         auto delta = std::max(msg.timestamp() - last_message_time_,
                               std::chrono::system_clock::duration::zero());
         last_message_time_ = msg.timestamp();
-        dest.append(std::to_string(std::chrono::duration_cast<Units>(delta).count()));
+        append_int(dest, std::chrono::duration_cast<Units>(delta).count());
     }
     mutable std::chrono::system_clock::time_point last_message_time_;
 };
@@ -597,9 +642,21 @@ public:
 private:
     auto format_value(const Message& msg, const std::tm& time, std::string& dest) const
         -> void override {
-        dest.append(std::format("[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] ", time.tm_year + 1900,
-                                time.tm_mon + 1, time.tm_mday, time.tm_hour, time.tm_min,
-                                time.tm_sec, nanosecond_fraction(msg) / 1'000'000));
+        dest.push_back('[');
+        append_zero_padded(dest, time.tm_year + 1900, 4);
+        dest.push_back('-');
+        append_zero_padded(dest, time.tm_mon + 1, 2);
+        dest.push_back('-');
+        append_zero_padded(dest, time.tm_mday, 2);
+        dest.push_back(' ');
+        append_zero_padded(dest, time.tm_hour, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_min, 2);
+        dest.push_back(':');
+        append_zero_padded(dest, time.tm_sec, 2);
+        dest.push_back('.');
+        append_zero_padded(dest, nanosecond_fraction(msg) / 1'000'000, 3);
+        dest.append("] ");
 
         if (!msg.logger_name().empty()) {
             dest.push_back('[');

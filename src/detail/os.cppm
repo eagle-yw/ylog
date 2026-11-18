@@ -24,15 +24,22 @@ namespace ylog_detail_os {
 
 // 线程 id（%t）：与 spdlog 的 os::thread_id() 一致，Linux 上取内核 TID，
 // 可与 ps -T/top -H 对照；异步 sink 因此报告生产者线程而不是工作线程。
+//
+// 每条 Message 构造都要取一次，而 Linux 的 gettid 是系统调用（实测约 116ns/次，
+// 是一条空日志的 5 倍）。tid 在同一线程内恒定，因此按线程缓存：与 spdlog
+// 的 `static thread_local` 做法一致（os-inl.h 的 thread_id()）。
 export auto thread_id() -> std::size_t {
+    static thread_local const auto cached = []() -> std::size_t {
 #if defined(_WIN32)
-    return static_cast<std::size_t>(::GetCurrentThreadId());
+        return static_cast<std::size_t>(::GetCurrentThreadId());
 #elif defined(__linux__)
-    return static_cast<std::size_t>(::syscall(SYS_gettid));
+        return static_cast<std::size_t>(::syscall(SYS_gettid));
 #else
-    // 兜底：仅保证同一线程稳定，可能与其它线程碰撞，也不对应内核 TID。
-    return static_cast<std::size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        // 兜底：仅保证同一线程稳定，可能与其它线程碰撞，也不对应内核 TID。
+        return static_cast<std::size_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
 #endif
+    }();
+    return cached;
 }
 
 // 进程 id（%P）：与 spdlog 一致，每次格式化时读取。
