@@ -1579,6 +1579,104 @@ TEST(AsyncLoggerTest, BlockPolicyReportsNothing) {
     EXPECT_TRUE(reports.snapshot().empty()) << "Block 策略下不应有丢弃上报";
 }
 
+TEST(AsyncLoggerTest, FlushReturnsAfterMessageIsWritten) {
+    auto directory = temp_test_path("async-flush");
+    std::filesystem::create_directories(directory);
+    auto path = directory / "flush.log";
+
+    {
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+        logger.append_sink(ylog::FileSink(path.string()), "%v");
+        logger.info({}, "persisted");
+        logger.flush();
+
+        EXPECT_EQ(read_all(path), "persisted\n");
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST(AsyncLoggerTest, FlushIsABarrierForEachProducingThread) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+    logger.append_sink(view, "%v");
+
+    auto pool = std::vector<std::jthread>{};
+    for (int tid = 0; tid < 4; ++tid) {
+        pool.emplace_back([&logger, &view, tid] {
+            auto payload = std::format("tid-{}", tid);
+            logger.info({}, "{}", payload);
+            logger.flush();
+
+            auto lines = view.snapshot();
+            EXPECT_NE(std::find(lines.begin(), lines.end(), payload + "\n"), lines.end())
+                << "flush 返回时本条消息尚未落盘";
+        });
+    }
+    for (auto& worker : pool) {
+        worker.join();
+    }
+
+    EXPECT_EQ(view.snapshot().size(), 4u);
+}
+
+TEST(AsyncLoggerTest, StopDrainsQueueAndLaterLogReportsOnce) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async", .err_handler = reports.handler()});
+    logger.append_sink(view, "%v");
+    for (int i = 0; i < 100; ++i) {
+        logger.info({}, "line-{}", i);
+    }
+
+    logger.stop();
+    EXPECT_EQ(view.snapshot().size(), 100u) << "stop() 没有排空已入队的消息";
+
+    std::binary_semaphore returned{0};
+    auto producer = std::jthread([&logger, &returned] {
+        logger.info({}, "after-stop-1");
+        logger.info({}, "after-stop-2");
+        returned.release();
+    });
+
+    EXPECT_TRUE(returned.try_acquire_for(std::chrono::milliseconds(200)))
+        << "停止后的 log() 阻塞了调用线程";
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 1u) << "停止后重复入队只应上报一次";
+    EXPECT_NE(reported[0].find("after-stop-1"), std::string::npos) << reported[0];
+    EXPECT_EQ(view.snapshot().size(), 100u);
+}
+
+TEST(AsyncLoggerTest, FlushAfterStopStillFlushesSinks) {
+    auto directory = temp_test_path("async-flush-after-stop");
+    std::filesystem::create_directories(directory);
+    auto path = directory / "stopped.log";
+
+    {
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+        logger.append_sink(ylog::FileSink(path.string()), "%v");
+        logger.info({}, "kept");
+        logger.stop();
+
+        std::binary_semaphore returned{0};
+        auto flusher = std::jthread([&logger, &returned] {
+            logger.flush();
+            returned.release();
+        });
+        EXPECT_TRUE(returned.try_acquire_for(std::chrono::milliseconds(500)))
+            << "停止后的 flush() 没有立即返回";
+        EXPECT_EQ(read_all(path), "kept\n");
+    }
+
+    std::filesystem::remove_all(directory);
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

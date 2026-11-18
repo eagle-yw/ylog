@@ -59,11 +59,17 @@ public:
     auto operator=(AsyncLogger&&) -> AsyncLogger& = delete;
 
     // 先请求停止，再由工作线程按 FIFO 排空队列，最后 join。
-    ~AsyncLogger() {
+    ~AsyncLogger() { stop(); }
+
+    // 显式停机：排空后返回。可重复调用；停止后的 log() 立即失败并只上报一次。
+    auto stop() -> void {
         worker_.request_stop();
         cv_ready_.notify_all();
         cv_space_.notify_all();
-        worker_.join();
+        std::lock_guard lock(join_mutex_);
+        if (worker_.joinable()) {
+            worker_.join();
+        }
     }
 
     auto name() const -> std::string_view { return name_; }
@@ -125,38 +131,41 @@ public:
             Message(level, name_, location, std::format(format, std::forward<Args>(args)...));
         auto overrun = std::string{};  // OverrunOldest 覆盖掉的最旧消息
         auto discarded = false;        // DiscardNew 丢弃的新消息
+        auto rejected_after_stop = false;
         auto enqueued = false;
         {
             std::unique_lock lock(mutex_);
             if (worker_finished_) {
-                return;
-            }
-            switch (overflow_policy_) {
-                case OverflowPolicy::Block:
-                    cv_space_.wait(lock, [this] {
-                        return worker_finished_ || message_count_ < queue_capacity_;
-                    });
-                    if (worker_finished_) {
-                        return;
-                    }
-                    enqueue(std::move(message));
-                    enqueued = true;
-                    break;
-                case OverflowPolicy::OverrunOldest:
-                    if (message_count_ >= queue_capacity_) {
-                        overrun = drop_oldest_message_locked();
-                    }
-                    enqueue(std::move(message));
-                    enqueued = true;
-                    break;
-                case OverflowPolicy::DiscardNew:
-                    if (message_count_ >= queue_capacity_) {
-                        discarded = true;
-                    } else {
+                rejected_after_stop = true;
+            } else {
+                switch (overflow_policy_) {
+                    case OverflowPolicy::Block:
+                        cv_space_.wait(lock, [this] {
+                            return worker_finished_ || message_count_ < queue_capacity_;
+                        });
+                        if (worker_finished_) {
+                            rejected_after_stop = true;
+                        } else {
+                            enqueue(std::move(message));
+                            enqueued = true;
+                        }
+                        break;
+                    case OverflowPolicy::OverrunOldest:
+                        if (message_count_ >= queue_capacity_) {
+                            overrun = drop_oldest_message_locked();
+                        }
                         enqueue(std::move(message));
                         enqueued = true;
-                    }
-                    break;
+                        break;
+                    case OverflowPolicy::DiscardNew:
+                        if (message_count_ >= queue_capacity_) {
+                            discarded = true;
+                        } else {
+                            enqueue(std::move(message));
+                            enqueued = true;
+                        }
+                        break;
+                }
             }
         }
         if (enqueued) {
@@ -167,6 +176,9 @@ public:
         }
         if (discarded) {
             report(std::format("溢出：丢弃新消息 {}（策略 discard_new）", message.formatted()));
+        }
+        if (rejected_after_stop) {
+            report_stopped_once(message.formatted());
         }
     }
 
@@ -245,6 +257,18 @@ private:
         }
     }
 
+    // 停止后的首次入队上报一次，避免刷屏。
+    auto report_stopped_once(std::string_view text) -> void {
+        {
+            std::lock_guard lock(mutex_);
+            if (stop_reported_) {
+                return;
+            }
+            stop_reported_ = true;
+        }
+        report(std::format("组件已停止，丢弃消息 {}", text));
+    }
+
     // 工作线程：停止请求后先把队列排空，再退出。
     auto run(std::stop_token token) -> void {
         for (;;) {
@@ -253,6 +277,10 @@ private:
             if (queue_.empty()) {
                 if (token.stop_requested()) {
                     worker_finished_ = true;
+                    lock.unlock();
+                    // 唤醒可能仍卡在容量上的生产者，让它们走停止分支而不是继续睡。
+                    cv_space_.notify_all();
+                    cv_ready_.notify_all();
                     return;
                 }
                 continue;
@@ -291,6 +319,8 @@ private:
     std::deque<QueueItem> queue_;
     std::size_t message_count_{0};
     bool worker_finished_{false};
+    bool stop_reported_{false};
+    std::mutex join_mutex_;
     std::jthread worker_;
 };
 
