@@ -472,6 +472,107 @@ TEST(SinkTest, ConceptCheck) {
     static_assert(!ylog::Sink<BadSink>);
 }
 
+TEST(SinkConcurrencyTest, ConcurrentWritesKeepEveryLineIntact) {
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view line) -> void { out->append(line); }
+    };
+
+    std::string output;
+    auto sink = ylog::AnySink(Capture{&output}, std::make_unique<ylog::PatternFormatter>("%v"));
+
+    constexpr int thread_count = 4;
+    constexpr int per_thread = 200;
+    auto produce = [&sink](int tid) {
+        for (int i = 0; i < per_thread; ++i) {
+            auto payload = std::format("{}-{:04d}-{}", tid, i, std::string(40, 'x'));
+            auto message = ylog::Message(ylog::Level::Info, "n", {}, payload);
+            sink.write(message);
+        }
+    };
+
+    auto pool = std::vector<std::thread>{};
+    for (int tid = 0; tid < thread_count; ++tid) {
+        pool.emplace_back(produce, tid);
+    }
+    for (auto& worker : pool) {
+        worker.join();
+    }
+
+    auto seen = std::set<std::pair<int, int>>{};
+    std::size_t pos = 0;
+    while (pos < output.size()) {
+        auto end = output.find('\n', pos);
+        ASSERT_NE(end, std::string::npos) << "unterminated line at offset " << pos;
+        auto line = std::string_view(output).substr(pos, end - pos);
+        ASSERT_EQ(line.size(), 47u) << "clobbered line: " << std::string(line);
+        ASSERT_EQ(line[1], '-');
+        ASSERT_EQ(line[6], '-');
+        ASSERT_EQ(line.substr(7), std::string(40, 'x'));
+        auto tid = line[0] - '0';
+        auto sequence = std::stoi(std::string(line.substr(2, 4)));
+        EXPECT_TRUE(seen.emplace(tid, sequence).second) << "duplicate line " << std::string(line);
+        pos = end + 1;
+    }
+    EXPECT_EQ(seen.size(), static_cast<std::size_t>(thread_count) * per_thread);
+}
+
+TEST(SinkConcurrencyTest, FormattingDoesNotHoldTheOutputLock) {
+    struct Gate {
+        std::atomic<bool> in_write{false};
+        std::atomic<bool> formatted_while_writing{false};
+        std::counting_semaphore<2> release{0};
+    };
+
+    struct ProbeFormatter final : ylog::Formatter {
+        Gate* gate;
+        explicit ProbeFormatter(Gate* target)
+            : gate(target) {}
+        auto format(const ylog::Message&, std::string& dest) -> void override {
+            if (gate->in_write.load()) {
+                gate->formatted_while_writing = true;
+            }
+            dest.append("probe\n");
+        }
+        auto clone() const -> std::unique_ptr<ylog::Formatter> override {
+            return std::make_unique<ProbeFormatter>(*this);
+        }
+        auto pattern() const -> std::string_view override { return ""; }
+    };
+
+    struct BlockingSink {
+        Gate* gate;
+        auto write(std::string_view) -> void {
+            gate->in_write = true;
+            gate->release.acquire();
+        }
+    };
+
+    Gate gate;
+    auto sink = ylog::AnySink(BlockingSink{&gate}, std::make_unique<ProbeFormatter>(&gate));
+    auto message = ylog::Message(ylog::Level::Info, "n", {}, "msg");
+
+    std::thread first([&sink, &message] { sink.write(message); });
+    while (!gate.in_write.load()) {
+        std::this_thread::yield();
+    }
+
+    std::thread second([&sink, &message] { sink.write(message); });
+
+    // 若格式化落在输出锁内，第二个线程永远等不到格式化机会。
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (!gate.formatted_while_writing.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto formatted_in_parallel = gate.formatted_while_writing.load();
+
+    gate.release.release(2);
+    first.join();
+    second.join();
+
+    EXPECT_TRUE(formatted_in_parallel);
+}
+
 namespace {
 
 auto temp_test_path(std::string_view name) -> std::filesystem::path {
