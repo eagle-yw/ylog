@@ -938,10 +938,15 @@ TEST(GenericSinkTest, FanOutKeepsAppendSinkOrder) {
     logger.append_sink(ylog::RingBufferSink(store), "%v");
     logger.append_sink(ylog::CallbackSink(second), "%v");
 
+    // 默认的 StdoutSink 仍在扇出里：新 sink 与它并存，各自都收到同一行。
+    auto to_stdout = std::ostringstream{};
+    auto* original = std::cout.rdbuf(to_stdout.rdbuf());
     logger.info({}, "msg");
+    std::cout.rdbuf(original);
 
     EXPECT_EQ(order, "first;second;");
     EXPECT_EQ(store.last(1), std::vector<std::string>{"msg\n"});
+    EXPECT_TRUE(to_stdout.str().ends_with("msg\n")) << to_stdout.str();
 }
 
 TEST(RegistryTest, CreateAndGet) {
@@ -1121,6 +1126,22 @@ TEST(AnySinkColorTest, NoRangeMeansNoEscapeBytes) {
 TEST(AnySinkColorTest, FullPatternColorsOnlyTheLevelName) {
     auto output = ostream_sink_output(ylog::Level::Warning, ylog::ColorMode::Always, "%+");
     EXPECT_TRUE(output.contains("\x1b[33mWarning\x1b[0m")) << output;
+}
+
+TEST(AnySinkColorTest, AutomaticIsTreatedAsAcceptingColor) {
+    // 协议口径是「非 Never 即接受」；把 Automatic 定型成两态是具体 sink 的责任。
+    struct AutomaticSink {
+        std::string* out;
+        auto write(std::string_view line) -> void { out->append(line); }
+        auto color_mode() const -> ylog::ColorMode { return ylog::ColorMode::Automatic; }
+    };
+
+    auto out = std::string{};
+    auto any =
+        ylog::AnySink(AutomaticSink{&out}, std::make_unique<ylog::PatternFormatter>("%^%l%$"));
+    any.write(ylog::Message(ylog::Level::Error, "n", {}, "msg"));
+
+    EXPECT_EQ(out, "\x1b[31mError\x1b[0m\n");
 }
 
 TEST(AnySinkColorTest, MalformedRangeIsIgnored) {

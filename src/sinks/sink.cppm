@@ -256,13 +256,12 @@ public:
                 [this, index, &message] { sinks_[index].write(message); },
                 [&failure](std::string_view why) { failure = std::string(why); });
             if (failure.empty()) {
-                failing_[index] = false;
+                failing_[index].reset();
                 continue;
             }
-            if (failing_[index]) {
+            if (!failing_[index].enter_failure()) {
                 continue;
             }
-            failing_[index] = true;
             std::invoke(on_failure, std::string_view(failure));
         }
     }
@@ -285,11 +284,11 @@ private:
     // sink 与它的失败状态必须同时增长，因此只留这一个入口。
     auto push(AnySink sink) -> void {
         sinks_.push_back(std::move(sink));
-        failing_.push_back(false);
+        failing_.emplace_back();
     }
 
     std::vector<AnySink> sinks_;
-    std::vector<bool> failing_;  // 与 sinks_ 等长：连续失败只在进入失败状态时上报一次
+    std::vector<ylog_detail_errors::failure_latch> failing_;  // 与 sinks_ 等长，逐 sink 的上报锁存
 };
 
 }  // namespace detail
