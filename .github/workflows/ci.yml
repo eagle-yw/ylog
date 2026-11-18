@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check formatting
         run: |
-          files=$(find src example test -type f \( -name '*.cppm' -o -name '*.cpp' \) -print)
+          files=$(find src example test bench -type f \( -name '*.cppm' -o -name '*.cpp' \) -print)
           clang-format --dry-run --Werror $files
 
   # clang-tidy 暂不进入 CI：clang 23 尚未实现 P2996 静态反射（`^^T` / `std::meta::*`），

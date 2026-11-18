@@ -32,6 +32,14 @@ endif()
 option(YLOG_NO_EXCEPTIONS "以 -fno-exceptions 构建 ylog" OFF)
 option(YLOG_BUILD_NOEXC_TESTS "额外构建无异常变体与自检（YLOG_NO_EXCEPTIONS=OFF 时生效）" ON)
 
+# 基准默认不构建：它依赖 Google Benchmark（缺失时自动拉取），且只有在 Release
+# 下数字才有意义。见 bench/ 与 gcc16-bench preset。
+option(YLOG_BUILD_BENCH "构建基准程序（bench/，需 Release）" OFF)
+
 add_subdirectory(src)
 add_subdirectory(test)
 add_subdirectory(example)
+
+if(YLOG_BUILD_BENCH)
+    add_subdirectory(bench)
+endif()

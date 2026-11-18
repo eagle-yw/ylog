@@ -42,6 +42,20 @@
             }
         },
         {
+            "name": "gcc16-bench",
+            "displayName": "GCC 16.2.1 (基准)",
+            "description": "Release 构建 + bench/；Debug 的基准数字没有意义，故与 gcc16 分开。不编无异常变体，基准只测主库",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "/usr/sbin/gcc",
+                "CMAKE_CXX_COMPILER": "/usr/sbin/g++",
+                "CMAKE_BUILD_TYPE": "Release",
+                "YLOG_BUILD_BENCH": "ON",
+                "YLOG_BUILD_NOEXC_TESTS": "OFF"
+            }
+        },
+        {
             "name": "clang",
             "displayName": "Clang 23.1.5 (供 clangd 使用)",
             "description": "只服务 clangd：clang 23 无 P2996 反射，无法构建本库（见 issue #43）。生成编译数据库与模块 BMI；clangd 版本须与 clang 一致",
@@ -67,6 +81,10 @@
         {
             "name": "gcc16-cov",
             "configurePreset": "gcc16-cov"
+        },
+        {
+            "name": "gcc16-bench",
+            "configurePreset": "gcc16-bench"
         }
     ]
 }

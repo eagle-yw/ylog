@@ -99,6 +99,33 @@ ctest --test-dir out/build/gcc16-noexc --output-on-failure
 异常开启的构建默认还会编一份 `ylog_noexc` 并用同一个自检程序覆盖，
 单次 `ctest` 就能同时验证两种模式（`YLOG_BUILD_NOEXC_TESTS=OFF` 可关闭）。
 
+## 基准测试
+
+`bench/` 是 spdlog 1.17.0 `bench/` 的对应物，默认不构建（`YLOG_BUILD_BENCH=OFF`）。
+基准必须在 Release 下跑——`gcc16` preset 是 Debug，数字没有意义，所以单列一个 preset：
+
+```sh
+cmake --preset gcc16-bench
+cmake --build --preset gcc16-bench --target bench_throughput bench_async bench_latency bench_formatter
+
+./out/build/gcc16-bench/bench/bench_throughput 250000 4
+./out/build/gcc16-bench/bench/bench_async 1000000 10 8192 3
+./out/build/gcc16-bench/bench/bench_latency full
+./out/build/gcc16-bench/bench/bench_formatter all
+```
+
+| 程序 | 对应 spdlog | 度量 |
+| --- | --- | --- |
+| `bench_throughput` | `bench.cpp` | 单/多线程下 null / file / 轮转 / 按日 / 关闭级别的吞吐（条/秒）|
+| `bench_latency` | `latency.cpp` | Google Benchmark 量单条日志耗时；`full` 追加文件类与多线程变体 |
+| `bench_formatter` | `formatter-bench.cpp` | 单个 pattern flag 与整串 pattern 的格式化耗时 |
+| `bench_async` | `async_bench.cpp` | 异步入队吞吐，并校验溢出策略（Block 必须一条不丢）|
+
+Google Benchmark 优先取系统包，缺失时由 FetchContent 拉 v1.9.1。两处刻意差异：
+ylog 没有 backtrace 与编译期关闭的宏，相应场景缺省；组件的默认 `StdoutSink` 没有
+摘除接口，基准统一把它换成待测 sink（`bench::replace_default_sink`），否则每条日志
+都会额外写一遍终端。日志文件落在**当前工作目录**的 `bench_logs/`。
+
 ## 覆盖率
 
 插桩构建单独一棵树（`gcc16-cov`），只统计 `src/`：
@@ -122,7 +149,7 @@ gcovr --root . --filter 'src/' --print-summary out/build/gcc16-cov
 ```sh
 # Arch：clang-format 随 clang 包
 sudo pacman -S clang
-clang-format -i $(find src example test -type f \( -name '*.cppm' -o -name '*.cpp' \))
+clang-format -i $(find src example test bench -type f \( -name '*.cppm' -o -name '*.cpp' \))
 ```
 
 非 Arch 环境用 `python3 -m pip install clang-format==23.1.5`，须与 CI 的小版本一致。
