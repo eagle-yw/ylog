@@ -15,6 +15,10 @@ concept Sink = requires(T& sink, std::string_view line) {
     { sink.write(line) } -> std::same_as<void>;
 };
 
+// 热路径失败的上报接口：入参是借用视图，只在调用期间有效（见 GLOSSARY）。
+// 它是 sink 配置结构体的共同单元，因此落在 sink 层；`AsyncLoggerConfig` 也复用它。
+export using ErrorHandler = std::function<void(std::string_view)>;
+
 // 颜色是 sink 的配置而不是 sink 的种类。上色动作由 AnySink 执行（只有 formatter 知道
 // 颜色区间，sink 只拿到一行字符串），sink 侧用可选协议 color_mode() 声明自己的意愿。
 export enum class ColorMode {
@@ -150,7 +154,7 @@ public:
     auto set_formatter(std::unique_ptr<Formatter> formatter) -> void {
         if (!formatter) {
             ylog_detail_errors::fail_config<std::invalid_argument>(
-                "set_formatter 需要一个非空的 formatter");
+                "set_formatter requires a formatter");
         }
         std::lock_guard lock(formatter_mutex_);
         formatter_ = std::move(formatter);

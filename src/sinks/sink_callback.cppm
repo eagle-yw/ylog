@@ -10,8 +10,7 @@ namespace ylog {
 // pattern 自带，见 ADR-0009 的 Known Divergence。
 export struct CallbackConfig {
     std::function<void(std::string_view)> fn;
-    std::function<void(std::string_view)> err_handler{
-        ylog_detail_errors::make_default_err_handler()};
+    ErrorHandler err_handler{ylog_detail_errors::make_default_err_handler()};
 };
 
 // 把行交给调用方提供的函数。实现 Sink 概念。

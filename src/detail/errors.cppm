@@ -30,24 +30,48 @@ auto fail_config(std::string_view reason) -> void {
     }
 }
 
-// 各 sink 配置结构体的默认 err_handler：故障时写 stderr，同一秒内只报一次。
-// 默认值集中在这里，避免每个 sink 各带一份限频状态（ADR-0009）。
-export auto make_default_err_handler() -> std::function<void(std::string_view)> {
-    struct state {
-        std::mutex mutex;
-        std::chrono::steady_clock::time_point last_report{};
-    };
+// 默认上报：写 stderr，约每秒一条，其余计数后静默丢弃（下次放行时附带抑制条数）。
+// 状态放在 shared_ptr 里：ErrorHandler 要求可拷贝，拷贝之间共享同一份限频。
+class rate_limited_reporter {
+public:
+    auto operator()(std::string_view text) const -> void {
+        constexpr auto interval_ns = std::chrono::seconds(1).count() * 1'000'000'000LL;
+        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
 
-    auto shared = std::make_shared<state>();
-    return [shared](std::string_view message) {
-        auto lock = std::lock_guard(shared->mutex);
-        auto now = std::chrono::steady_clock::now();
-        if (now - shared->last_report < std::chrono::seconds{1}) {
+        auto last = state_->last_report_ns.load(std::memory_order_relaxed);
+        if (last != 0 && now_ns - last < interval_ns) {
+            state_->suppressed.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        shared->last_report = now;
-        std::println(std::cerr, "[ylog] {}", message);
+        if (!state_->last_report_ns.compare_exchange_strong(last, now_ns,
+                                                            std::memory_order_relaxed)) {
+            state_->suppressed.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        auto suppressed = state_->suppressed.exchange(0, std::memory_order_relaxed);
+        if (suppressed > 0) {
+            std::println(std::cerr, "ylog: {}（此前已抑制 {} 条同类上报）", text, suppressed);
+        } else {
+            std::println(std::cerr, "ylog: {}", text);
+        }
+    }
+
+private:
+    struct state {
+        std::atomic<long long> last_report_ns{0};
+        std::atomic<long long> suppressed{0};
     };
+
+    std::shared_ptr<state> state_ = std::make_shared<state>();
+};
+
+// 默认 err_handler 的唯一实现：sink 配置结构体与 `AsyncLoggerConfig` 都从这里取值。
+// 每次调用各持一份窗口——限频是 per-sink 的，不是全局的。
+export auto make_default_err_handler() -> std::function<void(std::string_view)> {
+    return rate_limited_reporter{};
 }
 
 // 热路径失败的上报锁存：连续失败只上报一次，成功之后由调用方复位。

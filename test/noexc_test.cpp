@@ -110,11 +110,6 @@ auto universal_sinks_behave() -> void {
 // 公共面在无异常构建下同样可用：should_log 守门、sinks() 视图、set_formatter 扇出、
 // flush_on 的计数。
 auto logger_public_surface_behaves() -> void {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view line) -> void { *out += line; }
-    };
-
     struct CountingFlushSink {
         std::shared_ptr<std::atomic<int>> flushes;
         auto write(std::string_view) -> void {}

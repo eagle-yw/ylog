@@ -112,6 +112,21 @@ struct GatedFlushSink {
     }
 };
 
+// 收集行的 sink：断言「收到了什么字节」的用例共用它。
+struct CaptureSink {
+    std::string* out;
+    auto write(std::string_view line) -> void { out->append(line); }
+};
+
+// 声明自己接受颜色的捕获 sink：用于不经过具体 sink 的上色用例。
+struct ColoringCaptureSink {
+    std::string* out;
+    ylog::ColorMode mode;
+
+    auto write(std::string_view line) -> void { out->append(line); }
+    auto color_mode() const -> ylog::ColorMode { return mode; }
+};
+
 // 轮询等待，避免用固定 sleep 猜 worker 的进度。
 auto wait_until(const std::function<bool()>& predicate,
                 std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) -> bool {
@@ -222,6 +237,18 @@ TEST(LoggerTest, AppendSink) {
     EXPECT_TRUE(output.ends_with("append sink test 42\n"));
 }
 
+TEST(SinkTest, FormatterSeamRejectsEmptyFormatter) {
+    auto captured = std::string{};
+    auto any =
+        ylog::AnySink(CaptureSink{&captured}, std::make_unique<ylog::PatternFormatter>("%v"));
+
+    EXPECT_THROW(any.set_formatter(nullptr), std::invalid_argument);
+
+    // 拒绝之后原 formatter 仍在：这次违约不改变 sink 的可用状态。
+    any.write(ylog::Message(ylog::Level::Info, "n", {}, "still"));
+    EXPECT_EQ(captured, "still\n");
+}
+
 TEST(LoggerTest, ShouldLogFollowsLevel) {
     auto logger = ylog::Logger("should-log");
 
@@ -239,11 +266,6 @@ TEST(LoggerTest, ShouldLogFollowsLevel) {
 }
 
 TEST(LoggerTest, SinksExposeEveryAppendedSink) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view line) -> void { out->append(line); }
-    };
-
     auto first = std::string{};
     auto second = std::string{};
     auto logger = ylog::Logger("sinks");
@@ -253,8 +275,8 @@ TEST(LoggerTest, SinksExposeEveryAppendedSink) {
     auto initial = logger.sinks().size();
     EXPECT_EQ(initial, 1);
 
-    logger.append_sink(Capture{&first}, "%v");
-    logger.append_sink(Capture{&second}, "%v");
+    logger.append_sink(CaptureSink{&first}, "%v");
+    logger.append_sink(CaptureSink{&second}, "%v");
     EXPECT_EQ(logger.sinks().size(), initial + 2);
 
     // 元素可配置：单个 sink 的 pattern 只影响自己。
@@ -269,17 +291,12 @@ TEST(LoggerTest, SinksExposeEveryAppendedSink) {
 }
 
 TEST(LoggerTest, SetFormatterFansOutToEverySink) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view line) -> void { out->append(line); }
-    };
-
     auto first = std::string{};
     auto second = std::string{};
     auto logger = ylog::Logger("set-formatter");
     logger.set_level(ylog::Level::Info);
-    logger.append_sink(Capture{&first});
-    logger.append_sink(Capture{&second});
+    logger.append_sink(CaptureSink{&first});
+    logger.append_sink(CaptureSink{&second});
     auto first_index = logger.sinks().size() - 2;
 
     logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
@@ -570,33 +587,23 @@ TEST(FormatterTest, UnknownFlagRemainsLiteral) {
 }
 
 TEST(FormatterTest, PatternFlags) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view s) -> void { *out += s; }
-    };
-
     auto logger = ylog::Logger("flags");
     logger.set_level(ylog::Level::Info);
     std::string out;
     // 只用已知 flag: %L(短级别) %n(名称) %v(payload) %%(字面百分号)
-    logger.append_sink(Capture{&out}, "[%L] %n: %v 100%%");
+    logger.append_sink(CaptureSink{&out}, "[%L] %n: %v 100%%");
     logger.info({}, "hello");
 
     EXPECT_EQ(out, "[I] flags: hello 100%\n");
 }
 
 TEST(FormatterTest, PerSinkPattern) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view s) -> void { *out += s; }
-    };
-
     auto logger = ylog::Logger("multi");
     logger.set_level(ylog::Level::Info);
     std::string short_out, long_out;
     // 两个 sink 使用不同 pattern —— 移植自 spdlog 的核心设计
-    logger.append_sink(Capture{&short_out}, "%v");
-    logger.append_sink(Capture{&long_out}, "[%L] %v");
+    logger.append_sink(CaptureSink{&short_out}, "%v");
+    logger.append_sink(CaptureSink{&long_out}, "[%L] %v");
     logger.info({}, "same message");
 
     EXPECT_EQ(short_out, "same message\n");
@@ -604,16 +611,11 @@ TEST(FormatterTest, PerSinkPattern) {
 }
 
 TEST(FormatterTest, SetPatternFanout) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view s) -> void { *out += s; }
-    };
-
     auto logger = ylog::Logger("fanout");
     logger.set_level(ylog::Level::Info);
     std::string a, b;
-    logger.append_sink(Capture{&a}, "%v");
-    logger.append_sink(Capture{&b}, "%v");
+    logger.append_sink(CaptureSink{&a}, "%v");
+    logger.append_sink(CaptureSink{&b}, "%v");
     logger.set_pattern("<%L:%v>");
     logger.warning({}, "changed");
 
@@ -622,10 +624,6 @@ TEST(FormatterTest, SetPatternFanout) {
 }
 
 TEST(FormatterTest, PerSinkCustomFlagRegistrations) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view s) -> void { *out += s; }
-    };
     struct First {
         auto format(const ylog::Message&, const std::tm&, std::string& dest) -> void {
             dest.append("FIRST");
@@ -645,8 +643,8 @@ TEST(FormatterTest, PerSinkCustomFlagRegistrations) {
     auto logger = ylog::Logger("custom-sinks");
     logger.set_level(ylog::Level::Info);
     std::string a, b;
-    logger.append_sink(Capture{&a}, std::move(first));
-    logger.append_sink(Capture{&b}, std::move(second));
+    logger.append_sink(CaptureSink{&a}, std::move(first));
+    logger.append_sink(CaptureSink{&b}, std::move(second));
     logger.info({}, "msg");
 
     EXPECT_EQ(a, "FIRST\n");
@@ -654,10 +652,6 @@ TEST(FormatterTest, PerSinkCustomFlagRegistrations) {
 }
 
 TEST(FormatterTest, SetPatternFanoutPreservesCustomFlags) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view s) -> void { *out += s; }
-    };
     struct Marker {
         auto format(const ylog::Message&, const std::tm&, std::string& dest) -> void {
             dest.append("C");
@@ -672,8 +666,8 @@ TEST(FormatterTest, SetPatternFanoutPreservesCustomFlags) {
     auto logger = ylog::Logger("fanout-custom");
     logger.set_level(ylog::Level::Info);
     std::string a, b;
-    logger.append_sink(Capture{&a}, std::move(first));
-    logger.append_sink(Capture{&b}, std::move(second));
+    logger.append_sink(CaptureSink{&a}, std::move(first));
+    logger.append_sink(CaptureSink{&b}, std::move(second));
     logger.set_pattern("[%x]");
     logger.info({}, "msg");
 
@@ -682,10 +676,6 @@ TEST(FormatterTest, SetPatternFanoutPreservesCustomFlags) {
 }
 
 TEST(LoggerTest, SetPatternRejectsNonPatternFormatter) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view s) -> void { *out += s; }
-    };
     struct PlainFormatter final : ylog::Formatter {
         auto format(const ylog::Message&, std::string& dest) -> void override {
             dest.append("plain\n");
@@ -699,7 +689,7 @@ TEST(LoggerTest, SetPatternRejectsNonPatternFormatter) {
     auto logger = ylog::Logger("plain-formatter");
     logger.set_level(ylog::Level::Info);
     std::string out;
-    logger.append_sink(Capture{&out}, std::make_unique<PlainFormatter>());
+    logger.append_sink(CaptureSink{&out}, std::make_unique<PlainFormatter>());
 
     EXPECT_THROW(logger.set_pattern("%v"), std::invalid_argument);
     logger.info({}, "msg");
@@ -999,15 +989,10 @@ TEST(SinkTest, NullSinkWritesNothingAnywhere) {
 
 TEST(SinkTest, NullSinkDoesNotChangeOtherLoggerBehaviour) {
     auto output = std::string{};
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view line) -> void { out->append(line); }
-    };
-
     auto logger = ylog::Logger("null-sink");
     logger.set_level(ylog::Level::Info);
     logger.append_sink(ylog::NullSink{}, "%v");
-    logger.append_sink(Capture{&output}, "%v");
+    logger.append_sink(CaptureSink{&output}, "%v");
 
     logger.debug({}, "filtered");
     logger.info({}, "kept");
@@ -1161,16 +1146,11 @@ TEST(AnySinkColorTest, MalformedRangeIsIgnored) {
         auto color_range() const -> std::pair<std::size_t, std::size_t> override { return range; }
     };
 
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view line) -> void { out->append(line); }
-        auto color_mode() const -> ylog::ColorMode { return ylog::ColorMode::Always; }
-    };
-
     for (auto range :
          {std::pair<std::size_t, std::size_t>{4, 1}, std::pair<std::size_t, std::size_t>{0, 99}}) {
         auto out = std::string{};
-        auto any = ylog::AnySink(Capture{&out}, std::make_unique<RangeFormatter>(range));
+        auto any = ylog::AnySink(ColoringCaptureSink{&out, ylog::ColorMode::Always},
+                                 std::make_unique<RangeFormatter>(range));
         any.write(ylog::Message(ylog::Level::Info, "n", {}, "msg"));
         EXPECT_EQ(out, "abcdef\n");
     }
@@ -1237,13 +1217,8 @@ TEST(StdoutSinkTest, ReportsWriteFailureOnce) {
 }
 
 TEST(SinkConcurrencyTest, ConcurrentWritesKeepEveryLineIntact) {
-    struct Capture {
-        std::string* out;
-        auto write(std::string_view line) -> void { out->append(line); }
-    };
-
     std::string output;
-    auto sink = ylog::AnySink(Capture{&output}, std::make_unique<ylog::PatternFormatter>("%v"));
+    auto sink = ylog::AnySink(CaptureSink{&output}, std::make_unique<ylog::PatternFormatter>("%v"));
 
     constexpr int thread_count = 4;
     constexpr int per_thread = 200;

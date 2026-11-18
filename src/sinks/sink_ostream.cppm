@@ -38,8 +38,7 @@ inline auto fail_ostream_config(std::string_view reason) -> void {
 export struct OstreamConfig {
     std::ostream* stream{nullptr};
     ColorMode color{ColorMode::Never};
-    std::function<void(std::string_view)> err_handler{
-        ylog_detail_errors::make_default_err_handler()};
+    ErrorHandler err_handler{ylog_detail_errors::make_default_err_handler()};
 };
 
 // 输出到调用方给定的 ostream。实现 Sink 概念；stderr 变体由 OstreamSink{&std::cerr} 表达。

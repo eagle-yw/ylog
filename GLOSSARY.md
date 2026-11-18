@@ -37,7 +37,7 @@ _Avoid_: 异步记录器、async sink
 **OverflowPolicy**：`AsyncLogger` 队列满时的处置方式，构造后不可变。`Block` 等待空位，`OverrunOldest` 覆盖最旧的一条，`DiscardNew` 丢弃新来的一条。
 _Avoid_: 背压策略、丢弃模式
 
-**ErrorHandler**：`AsyncLogger` 热路径失败的通知回调，形如 `std::function<void(std::string_view)>`；入参是借用视图，只在调用期间有效。
+**ErrorHandler**：热路径失败的通知回调，形如 `std::function<void(std::string_view)>`；既是 `AsyncLogger` 的配置，也是各 Sink 配置结构体的 `err_handler`。入参是借用视图，只在调用期间有效。默认实现按 sink 各持一份约 1 秒的限频窗口。
 _Avoid_: 错误回调、日志回调
 
 **Flush 屏障**：`flush()` 的返回条件——它返回时，此前入队的消息都已写出、且每个 Sink 都已落盘。

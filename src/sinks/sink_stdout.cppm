@@ -10,8 +10,7 @@ namespace ylog {
 // stdout 的配置。err_handler 只在热路径失败时被调用，热路径不抛。
 export struct StdoutConfig {
     ColorMode color{ColorMode::Automatic};
-    std::function<void(std::string_view)> err_handler{
-        ylog_detail_errors::make_default_err_handler()};
+    ErrorHandler err_handler{ylog_detail_errors::make_default_err_handler()};
 };
 
 // 输出到 stdout。实现 Sink 概念。

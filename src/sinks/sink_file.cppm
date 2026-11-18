@@ -27,8 +27,7 @@ inline auto open_file_stream(const std::string& filename, bool truncate) -> std:
 export struct FileConfig {
     std::string filename;
     bool truncate_on_open{false};
-    std::function<void(std::string_view)> err_handler{
-        ylog_detail_errors::make_default_err_handler()};
+    ErrorHandler err_handler{ylog_detail_errors::make_default_err_handler()};
 };
 
 namespace detail {

@@ -69,8 +69,7 @@ export struct RotatingFileConfig {
     std::size_t max_files{7};
     bool rotate_on_open{false};
     bool truncate_on_open{false};
-    std::function<void(std::string_view)> err_handler{
-        ylog_detail_errors::make_default_err_handler()};
+    ErrorHandler err_handler{ylog_detail_errors::make_default_err_handler()};
 };
 
 namespace detail {

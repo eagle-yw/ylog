@@ -8,13 +8,11 @@ export module ylog:async;
 import std;
 import :level;
 import :message;
+import :sink;
 import :logger.base;
 import ylog_detail_errors;
 
 namespace ylog {
-
-// 热路径失败的上报接口：消息是借用视图，只在调用期间有效。
-export using ErrorHandler = std::function<void(std::string_view)>;
 
 // 队列溢出策略。构造后不可变，避免热路径读取配置时产生竞态。
 export enum class OverflowPolicy {
@@ -23,50 +21,12 @@ export enum class OverflowPolicy {
     DiscardNew,     // 队列满时丢弃新来的消息
 };
 
-namespace detail {
-
-// 默认上报：写 stderr，约每秒一条，其余计数后静默丢弃（下次放行时附带抑制条数）。
-// 状态放在 shared_ptr 里：ErrorHandler 要求可拷贝，拷贝之间共享同一份限频。
-class DefaultErrorHandler {
-public:
-    auto operator()(std::string_view text) const -> void {
-        constexpr auto interval_ns = std::chrono::seconds(1).count() * 1'000'000'000LL;
-        auto now = std::chrono::steady_clock::now().time_since_epoch();
-        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-
-        auto last = state_->last_report_ns.load(std::memory_order_relaxed);
-        if (last != 0 && now_ns - last < interval_ns) {
-            state_->suppressed.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-        if (!state_->last_report_ns.compare_exchange_strong(last, now_ns,
-                                                            std::memory_order_relaxed)) {
-            state_->suppressed.fetch_add(1, std::memory_order_relaxed);
-            return;
-        }
-
-        auto suppressed = state_->suppressed.exchange(0, std::memory_order_relaxed);
-        if (suppressed > 0) {
-            std::println(std::cerr, "ylog: {}（此前已抑制 {} 条同类上报）", text, suppressed);
-        } else {
-            std::println(std::cerr, "ylog: {}", text);
-        }
-    }
-
-private:
-    struct State {
-        std::atomic<long long> last_report_ns{0};
-        std::atomic<long long> suppressed{0};
-    };
-
-    std::shared_ptr<State> state_ = std::make_shared<State>();
-};
-
-}  // namespace detail
-
 // 默认 handler 的公开工厂：`AsyncLoggerConfig` 的默认值出现在导出类型的声明面上，
-// 那里不能写 detail 限定名，所以把构造收进这个公开函数。
-export auto default_error_handler() -> ErrorHandler { return detail::DefaultErrorHandler{}; }
+// 那里不能写 detail 限定名，所以把构造收进这个公开函数。实体在 `detail::errors`，
+// 与各 sink 配置结构体的默认值共用同一份实现（ADR-0009）。
+export auto default_error_handler() -> ErrorHandler {
+    return ylog_detail_errors::make_default_err_handler();
+}
 
 export struct AsyncLoggerConfig {
     std::string name;
