@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.31 FATAL_ERROR)
+# 最低版本由 `import std` 的实验 GUID 决定：GUID 只在 CMake 4.5 的 toolchain
+# 检测里被识别，4.4 及以下会直接报 "CXX_MODULE_STD requires toolchain support"。
+# CI 与本地都固定 4.5.0（README「构建要求」），升级 CMake 时须同步替换 GUID。
+cmake_minimum_required(VERSION 4.5 FATAL_ERROR)
 set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "0e5b6991-d74f-4b3d-a41c-cf096e0b2508")
 set(CMAKE_CXX_MODULE_STD ON)
 
