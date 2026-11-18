@@ -1,3 +1,8 @@
+module;
+
+// assert 是宏，`import std;` 带不进来；内部不变量要用它，只能在全局模块片段里取。
+#include <cassert>
+
 export module ylog:async;
 
 import std;
@@ -112,7 +117,14 @@ public:
     ~AsyncLogger() { stop(); }
 
     // 显式停机：排空后返回。可重复调用；停止后的 log() 立即失败并只上报一次。
+    //
+    // stopping_ 先于 request_stop 置位：「要排空的集合」必须是停止请求之前已入队的
+    // 消息。否则持续生产者会在排空窗口里继续追加，worker 永远看不到空队列，join 挂住。
     auto stop() -> void {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
         worker_.request_stop();
         cv_ready_.notify_all();
         cv_space_.notify_all();
@@ -149,20 +161,27 @@ public:
     }
 
     // 屏障：返回时先前入队的消息都已 write，且所有 sink 已 flush。
+    //
+    // 用「序号 + 条件变量」而不是往队列里塞控制消息：一条消息入队时拿到递增序号，
+    // 这里记住当时的最大序号作为本次目标，等 worker 把 sink flush 到该序号之后返回。
+    // 好处是队列里只有消息，长度严格受 capacity 约束，不随 flush 调用次数增长；
+    // 并发 flush 各自等自己的目标，互不提前结清。
     auto flush() -> void {
-        auto done = std::make_shared<std::promise<void>>();
-        auto future = done->get_future();
-        {
-            std::unique_lock lock(mutex_);
-            if (worker_finished_) {
-                lock.unlock();
-                flush_sinks();
-                return;
-            }
-            queue_.emplace_back(FlushCommand{std::move(done)});
+        std::unique_lock lock(mutex_);
+        auto target = next_sequence_;
+        if (worker_finished_) {
+            // 工作线程已退出，没人会把 sink flush 到目标：调用线程自己来。
+            // 同一 sink 的并发 flush 由 AnySink 的 output_mutex_ 串行化。
+            lock.unlock();
+            flush_sinks();
+            return;
         }
+        if (flushed_sequence_ >= target) {
+            return;  // 目标之内没有新消息，sink 也已经是 flush 过的状态
+        }
+        flush_target_ = std::max(flush_target_, target);
         cv_ready_.notify_one();
-        future.wait();
+        cv_flushed_.wait(lock, [this, target] { return flushed_sequence_ >= target; });
     }
 
     // 核心日志入口。SourceLocation 默认参数在调用点捕获位置。
@@ -183,15 +202,16 @@ public:
         auto enqueued = false;
         {
             std::unique_lock lock(mutex_);
-            if (worker_finished_) {
+            if (stopping_) {
                 rejected_after_stop = true;
             } else {
                 switch (overflow_policy_) {
                     case OverflowPolicy::Block:
-                        cv_space_.wait(lock, [this] {
-                            return worker_finished_ || message_count_ < queue_capacity_;
-                        });
-                        if (worker_finished_) {
+                        // 停止请求也要唤醒等待容量的生产者：让它放弃入队，而不是等到
+                        // 队列腾出空位——排空期间队列可能永远不空。
+                        cv_space_.wait(
+                            lock, [this] { return stopping_ || queue_.size() < queue_capacity_; });
+                        if (stopping_) {
                             rejected_after_stop = true;
                         } else {
                             enqueue(std::move(message));
@@ -199,14 +219,14 @@ public:
                         }
                         break;
                     case OverflowPolicy::OverrunOldest:
-                        if (message_count_ >= queue_capacity_) {
+                        if (queue_.size() >= queue_capacity_) {
                             overrun = drop_oldest_message_locked();
                         }
                         enqueue(std::move(message));
                         enqueued = true;
                         break;
                     case OverflowPolicy::DiscardNew:
-                        if (message_count_ >= queue_capacity_) {
+                        if (queue_.size() >= queue_capacity_) {
                             discarded = true;
                         } else {
                             enqueue(std::move(message));
@@ -257,11 +277,11 @@ public:
     }
 
 private:
-    struct FlushCommand {
-        std::shared_ptr<std::promise<void>> done;
+    // 队列里只有消息：序号在入队时分配，flush() 用它表达「刷到哪一条为止」。
+    struct QueuedMessage {
+        Message message;
+        std::size_t sequence;
     };
-
-    using QueueItem = std::variant<Message, FlushCommand>;
 
     auto should_log(Level msg_level) const -> bool {
         return msg_level >= level_.load(std::memory_order_relaxed);
@@ -282,21 +302,16 @@ private:
     }
 
     auto enqueue(Message message) -> void {
-        queue_.emplace_back(std::move(message));
-        ++message_count_;
+        queue_.push_back(QueuedMessage{std::move(message), next_sequence_++});
+        // 不变量：队列里只有消息，长度受容量约束，flush 不占用队列空间。
+        assert(queue_.size() <= queue_capacity_);
     }
 
-    // 调用方必须持有 mutex_。控制消息不是候选，跳过它们只删最旧的 Message。
+    // 调用方必须持有 mutex_。覆盖最旧的一条，返回它的文本供上报。
     auto drop_oldest_message_locked() -> std::string {
-        for (auto it = queue_.begin(); it != queue_.end(); ++it) {
-            if (auto* dropped = std::get_if<Message>(&*it)) {
-                auto text = std::string(dropped->formatted());
-                queue_.erase(it);
-                --message_count_;
-                return text;
-            }
-        }
-        return {};
+        auto text = std::string(queue_.front().message.formatted());
+        queue_.pop_front();
+        return text;
     }
 
     auto report(std::string text) -> void {
@@ -335,35 +350,44 @@ private:
         }
     }
 
-    // 工作线程：停止请求后先把队列排空，再退出。
+    // 工作线程：投递队列，按需为目标序号落盘；停止请求后先把队列排空，再退出。
     auto run(std::stop_token token) -> void {
         for (;;) {
             std::unique_lock lock(mutex_);
-            cv_ready_.wait(lock, token, [this] { return !queue_.empty(); });
-            if (queue_.empty()) {
-                if (token.stop_requested()) {
-                    worker_finished_ = true;
-                    lock.unlock();
-                    // 唤醒可能仍卡在容量上的生产者，让它们走停止分支而不是继续睡。
-                    cv_space_.notify_all();
-                    cv_ready_.notify_all();
-                    return;
-                }
+            cv_ready_.wait(lock, token,
+                           [this] { return !queue_.empty() || flush_target_ > flushed_sequence_; });
+
+            if (!queue_.empty()) {
+                auto item = std::move(queue_.front());
+                queue_.pop_front();
+                lock.unlock();
+                cv_space_.notify_one();
+                write_to_sinks(item.message);
+                lock.lock();
+                processed_sequence_ = item.sequence + 1;
                 continue;
             }
-            if (std::holds_alternative<Message>(queue_.front())) {
-                --message_count_;
-            }
-            auto item = std::move(queue_.front());
-            queue_.pop_front();
-            lock.unlock();
-            cv_space_.notify_one();
-
-            if (auto* message = std::get_if<Message>(&item)) {
-                write_to_sinks(*message);
-            } else {
+            if (flush_target_ > flushed_sequence_) {
+                // 队列空时 processed_sequence_ 一定追平 next_sequence_：覆盖策略只删队首，
+                // 最新入队的一条总会落地；所以这里不该出现「目标还没写出」的状态。
+                assert(processed_sequence_ >= flush_target_);
+                // 目标之内的消息都写完了：落盘一次，然后把这之前的序号标记为已 flush。
+                auto target = flush_target_;
+                lock.unlock();
                 flush_sinks();
-                std::get<FlushCommand>(item).done->set_value();
+                lock.lock();
+                flushed_sequence_ = std::max(flushed_sequence_, target);
+                cv_flushed_.notify_all();
+                continue;
+            }
+            if (token.stop_requested()) {
+                worker_finished_ = true;
+                lock.unlock();
+                // 唤醒可能仍卡在容量上或 flush 上的调用方，让它们走停止分支而不是继续睡。
+                cv_space_.notify_all();
+                cv_ready_.notify_all();
+                cv_flushed_.notify_all();
+                return;
             }
         }
     }
@@ -378,8 +402,13 @@ private:
     std::mutex mutex_;
     std::condition_variable_any cv_ready_;
     std::condition_variable_any cv_space_;
-    std::deque<QueueItem> queue_;
-    std::size_t message_count_{0};
+    std::condition_variable_any cv_flushed_;
+    std::deque<QueuedMessage> queue_;
+    std::size_t next_sequence_{0};       // 下一个待分配的序号 = 已入队条数
+    std::size_t processed_sequence_{0};  // 已被 worker 写出的条数
+    std::size_t flush_target_{0};        // 当前最高的 flush 目标（0 表示无请求）
+    std::size_t flushed_sequence_{0};    // 已确认落盘的条数
+    bool stopping_{false};
     bool worker_finished_{false};
     bool stop_reported_{false};
     std::mutex join_mutex_;
