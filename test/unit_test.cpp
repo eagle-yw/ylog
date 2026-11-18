@@ -183,14 +183,14 @@ TEST(FormatterTest, AddFlagRecompilesAndSuppliesTime) {
         }
     };
 
-    auto formatter = ylog::PatternFormatter("%x");
+    auto formatter = ylog::PatternFormatter("%Q");
     auto message = ylog::Message(ylog::Level::Info, "n", {}, "msg");
     std::string out;
     formatter.format(message, out);
-    EXPECT_EQ(out, "%x\n");
+    EXPECT_EQ(out, "%Q\n");
 
     bool saw_time = false;
-    formatter.add_flag('x', TimeFlag{&saw_time});
+    formatter.add_flag('Q', TimeFlag{&saw_time});
     out.clear();
     formatter.format(message, out);
     EXPECT_EQ(out, "\n");

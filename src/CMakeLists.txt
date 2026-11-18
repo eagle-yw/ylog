@@ -9,6 +9,7 @@ target_sources(ylog
     logger.cppm
     registry.cppm
     detail/errors.cppm
+    detail/os.cppm
     sinks/sink.cppm
     sinks/sink_stdout.cppm
     sinks/sink_file.cppm

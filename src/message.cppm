@@ -2,6 +2,7 @@ export module ylog:message;
 
 import std;
 import :level;
+import ylog_detail_os;
 
 namespace ylog {
 
@@ -16,6 +17,13 @@ export struct SourceLocation {
         : file(loc.file_name()),
           line(loc.line()),
           function(loc.function_name()) {}
+
+    // 显式指定位置：用于构造“无来源”的位置（line 为 0）或测试。
+    SourceLocation(std::string_view file, std::uint32_t line, std::string_view function)
+        : file(file), line(line), function(function) {}
+
+    // 与 spdlog 的 source_loc::empty() 同义：无行号即视为无来源。
+    auto empty() const -> bool { return line == 0 || file.empty(); }
 };
 
 // 编译期由反射生成的字段格式串元信息。
@@ -88,23 +96,27 @@ auto reflected(const T& object) -> Reflected<T> {
 }
 
 // 日志消息：在构造时完成格式化，供 sink 消费。
+// timestamp 与 thread_id 在构造点捕获：异步 sink 报告的是生产者线程与产生时刻。
 export class Message {
 public:
     Message(Level level,
             std::string_view logger_name,
             SourceLocation location,
-            std::string_view formatted)
+            std::string_view formatted,
+            std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now())
         : level_(level),
           logger_name_(logger_name),
           location_(location),
           formatted_(formatted),
-          timestamp_(std::chrono::system_clock::now()) {}
+          timestamp_(timestamp),
+          thread_id_(ylog_detail_os::thread_id()) {}
 
     auto level() const -> Level { return level_; }
     auto logger_name() const -> std::string_view { return logger_name_; }
     auto location() const -> const SourceLocation& { return location_; }
     auto formatted() const -> std::string_view { return formatted_; }
     auto timestamp() const -> std::chrono::system_clock::time_point { return timestamp_; }
+    auto thread_id() const -> std::size_t { return thread_id_; }
 
 private:
     Level level_;
@@ -112,6 +124,7 @@ private:
     SourceLocation location_;
     std::string formatted_;
     std::chrono::system_clock::time_point timestamp_;
+    std::size_t thread_id_;
 };
 
 } // namespace ylog
