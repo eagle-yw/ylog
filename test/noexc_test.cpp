@@ -75,6 +75,15 @@ auto universal_sinks_behave() -> void {
     null_output.write(ylog::Message(ylog::Level::Info, "n", {}, "dropped"));
     null_output.flush();
 
+    // 上色只发生在 `%^`/`%$` 的区间内，且只在 sink 接受颜色时。
+    auto colored = std::ostringstream{};
+    auto color_sink = ylog::OstreamSink(
+        ylog::OstreamConfig{.stream = &colored, .color = ylog::ColorMode::Always});
+    auto color_any =
+        ylog::AnySink(std::move(color_sink), std::make_unique<ylog::PatternFormatter>("%^%v%$"));
+    color_any.write(ylog::Message(ylog::Level::Warning, "n", {}, "warn"));
+    check(colored.str() == "\x1b[33mwarn\x1b[0m\n", "color mode wraps the marked range");
+
     // Automatic 在配置期定型，因此这里能读到确定的两态之一。
     check(ylog::StdoutSink{}.color_mode() != ylog::ColorMode::Automatic,
           "stdout sink resolves Automatic at configuration");

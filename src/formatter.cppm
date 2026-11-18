@@ -855,6 +855,10 @@ public:
     }
     virtual auto clone() const -> std::unique_ptr<Formatter> = 0;
     virtual auto pattern() const -> std::string_view = 0;
+
+    // 最近一次 format 中 `%^`/`%$`（或 `%+` 的级别名）标出的区间，左闭右开。
+    // 默认 {0, 0} 表示没有可上色的区间：颜色由 AnySink 按这个区间拼接（ADR-0009）。
+    virtual auto color_range() const -> std::pair<std::size_t, std::size_t> { return {0, 0}; }
 };
 
 // 可编译的 pattern formatter。
@@ -875,7 +879,7 @@ public:
     auto pattern() const -> std::string_view override { return pattern_; }
 
     // 最近一次 format 中 `%^`/`%$` 标出的区间；未出现时为 {0, 0}。
-    auto color_range() const -> std::pair<std::size_t, std::size_t> {
+    auto color_range() const -> std::pair<std::size_t, std::size_t> override {
         return {color_range_.start, color_range_.end};
     }
 

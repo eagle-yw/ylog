@@ -354,6 +354,45 @@ TEST(FormatterTest, PatternFlagConcept) {
     static_assert(!ylog::PatternFlag<NonCopyableFlag>);
 }
 
+TEST(FormatterTest, ColorRangeIsReadableThroughTheBaseClass) {
+    auto formatter = ylog::PatternFormatter("%^%l%$ %v");
+    auto message = ylog::Message(ylog::Level::Info, "n", {}, "msg");
+    auto out = std::string{};
+    formatter.format(message, out);
+
+    // 只有基类有虚函数时，类型擦除层才拿得到区间。
+    const ylog::Formatter& base = formatter;
+    auto [start, end] = base.color_range();
+    EXPECT_EQ(out.substr(start, end - start), "Info");
+    EXPECT_EQ(out, "Info msg\n");
+}
+
+TEST(FormatterTest, DefaultColorRangeIsEmpty) {
+    struct PlainFormatter final : ylog::Formatter {
+        auto format(const ylog::Message&, std::string& dest) -> void override {
+            dest.append("plain\n");
+        }
+        auto clone() const -> std::unique_ptr<ylog::Formatter> override {
+            return std::make_unique<PlainFormatter>(*this);
+        }
+        auto pattern() const -> std::string_view override { return ""; }
+    };
+
+    auto formatter = PlainFormatter{};
+    EXPECT_EQ(formatter.color_range(), (std::pair<std::size_t, std::size_t>{0, 0}));
+}
+
+TEST(FormatterTest, FullPatternMarksTheLevelNameForColor) {
+    auto formatter = ylog::PatternFormatter("%+");
+    auto message = ylog::Message(ylog::Level::Warning, "n", {}, "msg");
+    auto out = std::string{};
+    formatter.format(message, out);
+
+    auto [start, end] = formatter.color_range();
+    ASSERT_LT(start, end);
+    EXPECT_EQ(out.substr(start, end - start), "Warning");
+}
+
 TEST(FormatterTest, CustomFlagRegistration) {
     struct Marker {
         auto format(const ylog::Message&, const std::tm&, std::string& dest) -> void {
@@ -880,6 +919,90 @@ TEST(OstreamSinkTest, ReportsWriteFailureOnce) {
     EXPECT_NO_THROW(sink.write("first\n"));
     EXPECT_NO_THROW(sink.write("second\n"));
     EXPECT_EQ(failures.size(), 1);
+}
+
+namespace {
+
+// 一条经过 OstreamSink 的完整输出：用来断言「哪些字节该出现、哪些不该」。
+auto ostream_sink_output(ylog::Level level, ylog::ColorMode mode, std::string_view pattern)
+    -> std::string {
+    auto captured = std::ostringstream{};
+    auto sink = ylog::OstreamSink(ylog::OstreamConfig{.stream = &captured, .color = mode});
+    auto any = ylog::AnySink(std::move(sink), std::make_unique<ylog::PatternFormatter>(pattern));
+    any.write(ylog::Message(level, "n", {}, "msg"));
+    return captured.str();
+}
+
+}  // namespace
+
+TEST(AnySinkColorTest, ColorsTheMarkedRangeWhenTheSinkAcceptsColor) {
+    EXPECT_EQ(ostream_sink_output(ylog::Level::Info, ylog::ColorMode::Always, "%^%l%$ %v"),
+              "\x1b[32mInfo\x1b[0m msg\n");
+}
+
+TEST(AnySinkColorTest, PrefixFollowsTheMessageLevel) {
+    struct Case {
+        ylog::Level level;
+        std::string_view prefix;
+    };
+    constexpr auto cases = std::array{
+        Case{ylog::Level::Trace, "\x1b[90m"}, Case{ylog::Level::Debug, "\x1b[36m"},
+        Case{ylog::Level::Info, "\x1b[32m"},  Case{ylog::Level::Warning, "\x1b[33m"},
+        Case{ylog::Level::Error, "\x1b[31m"}, Case{ylog::Level::Critical, "\x1b[1;31m"},
+    };
+
+    for (const auto& [level, prefix] : cases) {
+        EXPECT_EQ(ostream_sink_output(level, ylog::ColorMode::Always, "%^%v%$"),
+                  std::format("{}{}\x1b[0m\n", prefix, "msg"))
+            << "level " << ylog::level_name(level);
+    }
+}
+
+TEST(AnySinkColorTest, NeverLeavesTheLineByteIdentical) {
+    EXPECT_EQ(ostream_sink_output(ylog::Level::Info, ylog::ColorMode::Never, "%^%l%$ %v"),
+              "Info msg\n");
+}
+
+TEST(AnySinkColorTest, NoRangeMeansNoEscapeBytes) {
+    EXPECT_EQ(ostream_sink_output(ylog::Level::Critical, ylog::ColorMode::Always, "%l %v"),
+              "Critical msg\n");
+}
+
+TEST(AnySinkColorTest, FullPatternColorsOnlyTheLevelName) {
+    auto output = ostream_sink_output(ylog::Level::Warning, ylog::ColorMode::Always, "%+");
+    EXPECT_TRUE(output.contains("\x1b[33mWarning\x1b[0m")) << output;
+}
+
+TEST(AnySinkColorTest, MalformedRangeIsIgnored) {
+    struct RangeFormatter final : ylog::Formatter {
+        std::pair<std::size_t, std::size_t> range;
+
+        explicit RangeFormatter(std::pair<std::size_t, std::size_t> marked)
+            : range(marked) {}
+
+        auto format(const ylog::Message&, std::string& dest) -> void override {
+            dest.append("abcdef\n");
+        }
+        auto clone() const -> std::unique_ptr<ylog::Formatter> override {
+            return std::make_unique<RangeFormatter>(*this);
+        }
+        auto pattern() const -> std::string_view override { return ""; }
+        auto color_range() const -> std::pair<std::size_t, std::size_t> override { return range; }
+    };
+
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view line) -> void { out->append(line); }
+        auto color_mode() const -> ylog::ColorMode { return ylog::ColorMode::Always; }
+    };
+
+    for (auto range :
+         {std::pair<std::size_t, std::size_t>{4, 1}, std::pair<std::size_t, std::size_t>{0, 99}}) {
+        auto out = std::string{};
+        auto any = ylog::AnySink(Capture{&out}, std::make_unique<RangeFormatter>(range));
+        any.write(ylog::Message(ylog::Level::Info, "n", {}, "msg"));
+        EXPECT_EQ(out, "abcdef\n");
+    }
 }
 
 TEST(StdoutSinkTest, WritesLineVerbatimWithDefaults) {

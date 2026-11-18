@@ -1,6 +1,7 @@
 export module ylog:sink;
 
 import std;
+import :level;
 import :message;
 import :formatter;
 import ylog_detail_errors;
@@ -38,6 +39,42 @@ namespace detail {
 inline auto scratch_buffer() -> std::string& {
     thread_local std::string buffer;
     return buffer;
+}
+
+// 级别 → 前景色。区间本身由 `%^`/`%$` 决定，级别只决定用什么颜色包住它。
+inline auto ansi_prefix(Level level) -> std::string_view {
+    switch (level) {
+        case Level::Trace:
+            return "\x1b[90m";
+        case Level::Debug:
+            return "\x1b[36m";
+        case Level::Info:
+            return "\x1b[32m";
+        case Level::Warning:
+            return "\x1b[33m";
+        case Level::Error:
+            return "\x1b[31m";
+        case Level::Critical:
+            return "\x1b[1;31m";
+        case Level::Off:
+            break;
+    }
+    return {};
+}
+
+inline constexpr std::string_view ansi_reset{"\x1b[0m"};
+
+// 在 [start, end) 两端插入转义序列。区间倒置或越界时宁可不写字节，也不产出半截转义。
+// 就地插入：整行已经在 scratch 里，不需要为它再复制一份。
+inline auto apply_color(std::string& line, Level level, std::pair<std::size_t, std::size_t> range)
+    -> void {
+    auto [start, end] = range;
+    auto prefix = ansi_prefix(level);
+    if (prefix.empty() || start >= end || end > line.size()) {
+        return;
+    }
+    line.insert(end, ansi_reset);
+    line.insert(start, prefix);
 }
 
 }  // namespace detail
@@ -81,13 +118,20 @@ public:
     // 格式化在输出临界区之外：先写线程局部缓冲，再短暂持锁交给底层 sink。
     auto write(const Message& message) -> void {
         auto& scratch = detail::scratch_buffer();
+        auto range = std::pair<std::size_t, std::size_t>{};
         scratch.clear();
         {
             std::lock_guard lock(formatter_mutex_);
             formatter_->format(message, scratch);
+            // 区间是 formatter 的每次格式化状态，必须在同一把锁下取走。
+            range = formatter_->color_range();
         }
         {
             std::lock_guard lock(output_mutex_);
+            // 上色在这里：formatter 只交出区间，sink 只收一行字符串（ADR-0009）。
+            if (model_->color_mode() != ColorMode::Never) {
+                detail::apply_color(scratch, message.level(), range);
+            }
             model_->write(scratch);
         }
     }
