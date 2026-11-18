@@ -22,9 +22,59 @@ export enum class OverflowPolicy {
 
 namespace detail {
 
-// 默认上报：写 stderr 并换行。限频在后续工单处理，这里保持最简实现。
-inline auto default_error_handler(std::string_view text) -> void {
-    std::println(std::cerr, "ylog: {}", text);
+// 默认上报：写 stderr，约每秒一条，其余计数后静默丢弃（下次放行时附带抑制条数）。
+// 状态放在 shared_ptr 里：ErrorHandler 要求可拷贝，拷贝之间共享同一份限频。
+class DefaultErrorHandler {
+public:
+    auto operator()(std::string_view text) const -> void {
+        constexpr auto interval_ns = std::chrono::seconds(1).count() * 1'000'000'000LL;
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
+
+        auto last = state_->last_report_ns.load(std::memory_order_relaxed);
+        if (last != 0 && now_ns - last < interval_ns) {
+            state_->suppressed.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (!state_->last_report_ns.compare_exchange_strong(last, now_ns,
+                                                            std::memory_order_relaxed)) {
+            state_->suppressed.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
+        auto suppressed = state_->suppressed.exchange(0, std::memory_order_relaxed);
+        if (suppressed > 0) {
+            std::println(std::cerr, "ylog: {}（此前已抑制 {} 条同类上报）", text, suppressed);
+        } else {
+            std::println(std::cerr, "ylog: {}", text);
+        }
+    }
+
+private:
+    struct State {
+        std::atomic<long long> last_report_ns{0};
+        std::atomic<long long> suppressed{0};
+    };
+
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+};
+
+// sink 调用守卫：把异常收敛成一次上报。
+// 必须是模板：-fno-exceptions 下 try/catch 的语义检查发生在实例化期，
+// 被 if constexpr 丢弃的分支才不会报“exception handling disabled”。
+template <typename Action, typename OnFailure>
+inline auto guard_sink_call(Action&& action, OnFailure&& on_failure) -> void {
+    if constexpr (ylog_detail_errors::exceptions_enabled) {
+        try {
+            std::invoke(action);
+        } catch (const std::exception& failure) {
+            std::invoke(on_failure, std::string_view(failure.what()));
+        } catch (...) {
+            std::invoke(on_failure, std::string_view("未知异常"));
+        }
+    } else {
+        std::invoke(action);
+    }
 }
 
 }  // namespace detail
@@ -34,7 +84,7 @@ export struct AsyncLoggerConfig {
     Level level = Level::Info;
     std::size_t queue_capacity = 8192;
     OverflowPolicy overflow_policy = OverflowPolicy::Block;
-    ErrorHandler err_handler = detail::default_error_handler;
+    ErrorHandler err_handler = detail::DefaultErrorHandler{};
 };
 
 // 异步日志组件：调用线程只做级别检查、Message 构造与入队，
@@ -106,9 +156,7 @@ public:
             std::unique_lock lock(mutex_);
             if (worker_finished_) {
                 lock.unlock();
-                for (auto& sink : sinks_) {
-                    sink.flush();
-                }
+                flush_sinks();
                 return;
             }
             queue_.emplace_back(FlushCommand{std::move(done)});
@@ -269,6 +317,24 @@ private:
         report(std::format("组件已停止，丢弃消息 {}", text));
     }
 
+    // 单个 sink 失败只上报并跳过：异常不得逃出工作线程，也不影响其它 sink。
+    // 无异常构建下 sink 不会抛，守卫退化为直接调用。
+    auto write_to_sinks(const Message& message) -> void {
+        for (auto& sink : sinks_) {
+            detail::guard_sink_call(
+                [&sink, &message] { sink.write(message); },
+                [this](std::string_view why) { report(std::format("sink 写入失败：{}", why)); });
+        }
+    }
+
+    auto flush_sinks() -> void {
+        for (auto& sink : sinks_) {
+            detail::guard_sink_call(
+                [&sink] { sink.flush(); },
+                [this](std::string_view why) { report(std::format("sink flush 失败：{}", why)); });
+        }
+    }
+
     // 工作线程：停止请求后先把队列排空，再退出。
     auto run(std::stop_token token) -> void {
         for (;;) {
@@ -294,13 +360,9 @@ private:
             cv_space_.notify_one();
 
             if (auto* message = std::get_if<Message>(&item)) {
-                for (auto& sink : sinks_) {
-                    sink.write(*message);
-                }
+                write_to_sinks(*message);
             } else {
-                for (auto& sink : sinks_) {
-                    sink.flush();
-                }
+                flush_sinks();
                 std::get<FlushCommand>(item).done->set_value();
             }
         }

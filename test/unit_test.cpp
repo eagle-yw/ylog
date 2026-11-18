@@ -1677,6 +1677,74 @@ TEST(AsyncLoggerTest, FlushAfterStopStillFlushesSinks) {
     std::filesystem::remove_all(directory);
 }
 
+TEST(AsyncLoggerTest, SinkFailureIsReportedAndOtherSinksKeepWorking) {
+    struct ThrowingSink {
+        auto write(std::string_view) -> void { throw std::runtime_error("boom"); }
+        auto flush() -> void {}
+    };
+
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async", .err_handler = reports.handler()});
+    logger.append_sink(ThrowingSink{}, "%v");
+    logger.append_sink(view, "%v");
+
+    logger.info({}, "a");
+    logger.info({}, "b");
+
+    ASSERT_TRUE(view.wait_for(2, std::chrono::milliseconds(1000)))
+        << "第一个 sink 抛异常后工作线程没有继续投递";
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 2u) << "每条消息应对失败 sink 上报一次";
+    EXPECT_NE(reported[0].find("boom"), std::string::npos) << reported[0];
+    EXPECT_EQ(view.snapshot().size(), 2u);
+}
+
+TEST(AsyncLoggerTest, HandlerExceptionDoesNotKillWorker) {
+    struct ThrowingSink {
+        auto write(std::string_view) -> void { throw std::runtime_error("boom"); }
+        auto flush() -> void {}
+    };
+    struct ThrowingHandler {
+        auto operator()(std::string_view) const -> void { throw std::runtime_error("handler"); }
+    };
+
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async", .err_handler = ThrowingHandler{}});
+    logger.append_sink(ThrowingSink{}, "%v");
+    logger.append_sink(view, "%v");
+
+    logger.info({}, "a");
+    logger.info({}, "b");
+
+    EXPECT_TRUE(view.wait_for(2, std::chrono::milliseconds(1000)))
+        << "err_handler 抛异常后工作线程停止了";
+}
+
+TEST(AsyncLoggerTest, DefaultHandlerIsRateLimited) {
+    auto config = ylog::AsyncLoggerConfig{.name = "async"};
+    auto captured = std::ostringstream{};
+    auto* original = std::cerr.rdbuf(captured.rdbuf());
+
+    for (int i = 0; i < 5; ++i) {
+        config.err_handler("同一秒内的重复上报");
+    }
+    std::cerr.flush();
+    std::cerr.rdbuf(original);
+
+    auto text = captured.str();
+    EXPECT_EQ(std::count(text.begin(), text.end(), '\n'), 1) << "默认 handler 没有限频，输出：\n"
+                                                             << text;
+    EXPECT_NE(text.find("同一秒内的重复上报"), std::string::npos);
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
