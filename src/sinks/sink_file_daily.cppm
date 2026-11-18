@@ -56,7 +56,8 @@ inline auto path_exists(const std::filesystem::path& path) -> bool {
     return error ? false : result;
 }
 
-inline auto try_open_daily_stream(const std::filesystem::path& path, bool truncate,
+inline auto try_open_daily_stream(const std::filesystem::path& path,
+                                  bool truncate,
                                   std::error_code& error) -> std::ofstream {
     if (auto parent = path.parent_path(); !parent.empty()) {
         std::filesystem::create_directories(parent, error);
@@ -82,13 +83,13 @@ inline auto open_daily_stream(const std::filesystem::path& path, bool truncate) 
     return stream;
 }
 
-inline auto daily_path(const std::string& filename,
-                       std::chrono::system_clock::time_point now) -> std::filesystem::path {
+inline auto daily_path(const std::string& filename, std::chrono::system_clock::time_point now)
+    -> std::filesystem::path {
     auto path = std::filesystem::path(filename);
     auto [stem, extension] = split_stem_and_extension(filename);
     auto value = daily_localtime(std::chrono::system_clock::to_time_t(now));
-    auto date = std::format("{:04d}-{:02d}-{:02d}", value.tm_year + 1900, value.tm_mon + 1,
-                            value.tm_mday);
+    auto date =
+        std::format("{:04d}-{:02d}-{:02d}", value.tm_year + 1900, value.tm_mon + 1, value.tm_mday);
     return path.parent_path() / std::format("{}_{}{}", stem, date, extension);
 }
 
@@ -109,7 +110,7 @@ inline auto next_midnight(std::chrono::system_clock::time_point now)
     return candidate;
 }
 
-} // namespace detail
+}  // namespace detail
 
 export struct DailyFileConfig {
     std::string filename;
@@ -131,7 +132,7 @@ inline auto validate_daily_config(DailyFileConfig config) -> DailyFileConfig {
     return config;
 }
 
-} // namespace detail
+}  // namespace detail
 
 export class DailyFileSink {
 public:
@@ -207,10 +208,11 @@ private:
         }
     }
 
-    auto report_failure_(std::string_view operation, const std::filesystem::path& path,
+    auto report_failure_(std::string_view operation,
+                         const std::filesystem::path& path,
                          std::string_view reason) -> void {
-        auto message = std::format("daily file sink {} failed for '{}': {}", operation,
-                                   path.string(), reason);
+        auto message =
+            std::format("daily file sink {} failed for '{}': {}", operation, path.string(), reason);
         ylog_detail_errors::safe_err_handler(config_.err_handler, message);
     }
 
@@ -223,4 +225,4 @@ private:
     std::vector<std::filesystem::path> created_files_;
 };
 
-} // namespace ylog
+}  // namespace ylog

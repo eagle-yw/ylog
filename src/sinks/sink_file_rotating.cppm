@@ -40,7 +40,8 @@ inline auto split_stem_and_extension(const std::string& filename)
     return {name, {}};
 }
 
-inline auto try_open_rotating_stream(const std::filesystem::path& path, bool truncate,
+inline auto try_open_rotating_stream(const std::filesystem::path& path,
+                                     bool truncate,
                                      std::error_code& error) -> std::ofstream {
     if (auto parent = path.parent_path(); !parent.empty()) {
         std::filesystem::create_directories(parent, error);
@@ -72,14 +73,13 @@ inline auto file_size_or_zero(const std::string& filename) -> std::size_t {
     return error ? std::size_t{0} : static_cast<std::size_t>(size);
 }
 
-inline auto backup_path(const std::string& filename, std::size_t index)
-    -> std::filesystem::path {
+inline auto backup_path(const std::string& filename, std::size_t index) -> std::filesystem::path {
     auto path = std::filesystem::path(filename);
     auto [stem, extension] = split_stem_and_extension(filename);
     return path.parent_path() / std::format("{}.{}{}", stem, index, extension);
 }
 
-} // namespace detail
+}  // namespace detail
 
 export struct RotatingFileConfig {
     std::string filename;
@@ -97,13 +97,12 @@ inline auto validate_rotating_config(RotatingFileConfig config) -> RotatingFileC
         fail_rotating_config("max_size must be greater than 0");
     }
     if (config.max_files > 200000) {
-        fail_rotating_config(
-            std::format("max_files must be <= 200000 (got {})", config.max_files));
+        fail_rotating_config(std::format("max_files must be <= 200000 (got {})", config.max_files));
     }
     return config;
 }
 
-} // namespace detail
+}  // namespace detail
 
 export class RotatingFileSink {
 public:
@@ -184,7 +183,8 @@ private:
         current_size_ = 0;
     }
 
-    auto report_failure_(std::string_view operation, const std::filesystem::path& path,
+    auto report_failure_(std::string_view operation,
+                         const std::filesystem::path& path,
                          std::string_view reason) -> void {
         auto message = std::format("rotating file sink {} failed for '{}': {}", operation,
                                    path.string(), reason);
@@ -196,4 +196,4 @@ private:
     std::size_t current_size_{0};
 };
 
-} // namespace ylog
+}  // namespace ylog
