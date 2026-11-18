@@ -41,3 +41,12 @@ handler 总是在某个线程上同步调用：丢弃/停止上报发生在调�
 上面「`append_sink` / `set_pattern` 只在配置期合法」一条只对 `set_pattern` 仍然成立，且它现在是安全的：formatter 归属 sink，`set_pattern` 逐 sink 取 `formatter_mutex_`，与 worker 的遍历并存。
 
 `append_sink` 已随 ADR-0011 删除：sink 集合在构造期由 `AsyncLoggerConfig::sinks` 一次给定，worker 启动之后不存在「被追加」的可能，`configurable_` / `ensure_configurable()` / `seal_configuration()` 一并消失。因此原文末句「若将来需要运行期热插拔 sink」不必再解：能力本身不再提供。
+
+## 追加：队列与 Flush 屏障归一个内部 owner
+
+上面的机制一度分散在 `AsyncLogger` 的六处入口（`stop` / `flush` / `log` / `enqueue` / `run` / 驱逐），改一处 `flush_on` 要同时追准入、驱逐、进度、唤醒与排空顺序。现在这些转换归 `src/async_queue.cppm` 的 `detail::QueueBarrier`：它是 `:async.queue` 实现分区且不导出任何名字——同一模块的 `:async` 能用，模块外看不见也命名不了（同 `:logger.base`），公开面仍然只有 `AsyncLogger`。
+
+- **三条转换规则集中在一处**：准入（Block 等空位、OverrunOldest 覆盖队首、DiscardNew 丢弃，以及 `flush_on` 把屏障目标推到刚入队的那条）、屏障（`arm_barrier` 判定这次等什么，`next_work` 负责结算）、停机（`begin_stop` 固定排空集合，排空走完 `next_work` 才给 `finished`）。
+- **锁边界不变**：接口的每个出口只交出「锁外要做的事」——待投递的消息、待结算的落盘目标、丢失条目的文本。Sink 投递与 `err_handler` 调用仍然一律在队列锁外（见上面「err_handler 的重入边界」）。
+- **丢失条目的文本改由队列拷出**。原实现交给上报的是指向 `Message::formatted()` 的视图，只在「该分支恰好没有 move」时才成立；现在消息进队列那一刻就在锁内拷好，入队成功路径不额外分配。
+- 对外行为不变：屏障语义、队列长度只受 `queue_capacity` 约束、重复 `stop()`、停止后由调用线程 flush sink 都保持原样；新增两个用例锁定「覆盖 × 屏障 × 停机」同时发生。

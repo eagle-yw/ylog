@@ -1,8 +1,3 @@
-module;
-
-// assert 是宏，`import std;` 带不进来；内部不变量要用它，只能在全局模块片段里取。
-#include <cassert>
-
 export module ylog:async;
 
 import std;
@@ -10,6 +5,7 @@ import :level;
 import :message;
 import :sink;
 import :logger.base;
+import :async.queue;
 import ylog_detail_errors;
 
 namespace ylog {
@@ -42,7 +38,10 @@ export struct AsyncLoggerConfig {
 // 异步日志组件：调用线程只做级别检查、Message 构造与入队，
 // 由独占的工作线程把消息投递给自己的 sink。
 // 契约：不实现 Sink concept，也不修改 Logger；名称/级别/sink 集合与级别便捷方法
-// 来自 detail::LoggerBase，这里只追加队列与工作线程。
+// 来自 detail::LoggerBase，这里只追加队列、工作线程与上报口径。
+//
+// 队列与 Flush 屏障的转换规则归 detail::QueueBarrier：本组件只负责「把消息交给队列」
+// 与「把队列交出来的东西送到 sink」。锁内不做 sink I/O，也不调 err_handler。
 //
 // sink 集合在构造期定型，worker 启动后不存在「被追加」的可能，因此不需要封板断言；
 // set_pattern 逐 sink 加 formatter 锁，可与 worker 的遍历并存。
@@ -52,10 +51,8 @@ export class AsyncLogger : public detail::LoggerBase<AsyncLogger> {
 public:
     explicit AsyncLogger(AsyncLoggerConfig config)
         : LoggerBase(std::move(config.name), config.level, std::move(config.sinks)),
-          queue_capacity_(config.queue_capacity),
-          overflow_policy_(config.overflow_policy),
+          queue_(make_queue(config.queue_capacity, config.overflow_policy)),
           err_handler_(std::move(config.err_handler)) {
-        validate_config();
         worker_ = std::jthread([this](std::stop_token token) { run(token); });
     }
 
@@ -69,24 +66,20 @@ public:
 
     // 显式停机：排空后返回。可重复调用；停止后的每次 log() 都立即失败并各自上报。
     //
-    // stopping_ 先于 request_stop 置位：「要排空的集合」必须是停止请求之前已入队的
-    // 消息。否则持续生产者会在排空窗口里继续追加，worker 永远看不到空队列，join 挂住。
+    // 顺序固定为「先固定排空集合，再打断工作线程，最后 join」：排空集合必须是停止
+    // 请求之前已入队的消息，否则持续生产者会在排空窗口里继续追加，worker 永远看不到
+    // 空队列，join 挂住。join 用自己的锁，不能跨到队列锁上——worker 每轮都要队列锁。
     auto stop() -> void {
-        {
-            std::lock_guard lock(mutex_);
-            stopping_ = true;
-        }
+        queue_.begin_stop();
         worker_.request_stop();
-        cv_ready_.notify_all();
-        cv_space_.notify_all();
         std::lock_guard lock(join_mutex_);
         if (worker_.joinable()) {
             worker_.join();
         }
     }
 
-    auto queue_capacity() const -> std::size_t { return queue_capacity_; }
-    auto overflow_policy() const -> OverflowPolicy { return overflow_policy_; }
+    auto queue_capacity() const -> std::size_t { return queue_.capacity(); }
+    auto overflow_policy() const -> OverflowPolicy { return public_policy(queue_.policy()); }
 
     // 屏障：返回时先前入队的消息都已 write，且所有 sink 已 flush。
     //
@@ -95,21 +88,19 @@ public:
     // 好处是队列里只有消息，长度严格受 capacity 约束，不随 flush 调用次数增长；
     // 并发 flush 各自等自己的目标，互不提前结清。
     auto flush() -> void {
-        std::unique_lock lock(mutex_);
-        auto target = next_sequence_;
-        if (worker_finished_) {
-            // 工作线程已退出，没人会把 sink flush 到目标：调用线程自己来。
-            // 同一 sink 的并发 flush 由 AnySink 的 output_mutex_ 串行化。
-            lock.unlock();
-            flush_sinks();
-            return;
+        auto request = queue_.arm_barrier();
+        switch (request.next) {
+            case detail::barrier_request::kind::satisfied:
+                return;  // 目标之内没有新消息，sink 也已经是 flush 过的状态
+            case detail::barrier_request::kind::worker_gone:
+                // 工作线程已退出，没人会把 sink flush 到目标：调用线程自己来。
+                // 同一 sink 的并发 flush 由 AnySink 的 output_mutex_ 串行化。
+                flush_sinks();
+                return;
+            case detail::barrier_request::kind::wait:
+                queue_.await_barrier(request.target);
+                return;
         }
-        if (flushed_sequence_ >= target) {
-            return;  // 目标之内没有新消息，sink 也已经是 flush 过的状态
-        }
-        flush_target_ = std::max(flush_target_, target);
-        cv_ready_.notify_one();
-        cv_flushed_.wait(lock, [this, target] { return flushed_sequence_ >= target; });
     }
 
     // 核心日志入口。SourceLocation 默认参数在调用点捕获位置。
@@ -124,46 +115,10 @@ public:
         }
         auto message =
             Message(level, name(), location, std::format(format, std::forward<Args>(args)...));
-        // 文本快照在任何 move 之前取：上报不依赖「这个分支恰好没有 move」这一隐式事实。
-        auto text = message.formatted();
-        auto outcome = EnqueueOutcome{};
-        {
-            std::unique_lock lock(mutex_);
-            if (stopping_) {
-                outcome.note(EnqueueOutcome::Loss::Rejected, text);
-            } else {
-                switch (overflow_policy_) {
-                    case OverflowPolicy::Block:
-                        // 停止请求也要唤醒等待容量的生产者：让它放弃入队，而不是等到
-                        // 队列腾出空位——排空期间队列可能永远不空。
-                        cv_space_.wait(
-                            lock, [this] { return stopping_ || queue_.size() < queue_capacity_; });
-                        if (stopping_) {
-                            outcome.note(EnqueueOutcome::Loss::Rejected, text);
-                        } else {
-                            enqueue(std::move(message), outcome);
-                        }
-                        break;
-                    case OverflowPolicy::OverrunOldest:
-                        if (queue_.size() >= queue_capacity_) {
-                            outcome.note(EnqueueOutcome::Loss::Overrun, evict_oldest_locked());
-                        }
-                        enqueue(std::move(message), outcome);
-                        break;
-                    case OverflowPolicy::DiscardNew:
-                        if (queue_.size() >= queue_capacity_) {
-                            outcome.note(EnqueueOutcome::Loss::Discarded, text);
-                        } else {
-                            enqueue(std::move(message), outcome);
-                        }
-                        break;
-                }
-            }
-        }
-        if (outcome.enqueued) {
-            cv_ready_.notify_one();
-        }
-        outcome.report(err_handler_);
+        // Flush 阈值在入队前折算：入队成功后由队列把屏障目标推到这一条。
+        auto reached_flush_level = message.level() >= flush_level();
+        auto admitted = queue_.admit(std::move(message), reached_flush_level);
+        EnqueueOutcome::from(std::move(admitted)).report(err_handler_);
     }
 
 private:
@@ -174,12 +129,21 @@ private:
 
         Loss loss = Loss::None;
         std::string lost;  // 丢失条目的文本快照；入队成功时为空
-        bool enqueued = false;
 
-        // 文本在 Message 被 move 之前拷进来，避免持有指向已搬走对象的视图。
-        auto note(Loss kind, std::string_view text) -> void {
-            loss = kind;
-            lost = text;
+        // 队列给出的后果 → 上报口径。丢失条目的文本由队列在消息还活着时拷出，
+        // 这里不再碰 Message：入队这一支已经把消息搬走了。
+        static auto from(detail::admission admitted) -> EnqueueOutcome {
+            switch (admitted.result) {
+                case detail::admission::outcome::overran:
+                    return EnqueueOutcome{Loss::Overrun, std::move(admitted.lost)};
+                case detail::admission::outcome::discarded:
+                    return EnqueueOutcome{Loss::Discarded, std::move(admitted.lost)};
+                case detail::admission::outcome::rejected:
+                    return EnqueueOutcome{Loss::Rejected, std::move(admitted.lost)};
+                case detail::admission::outcome::enqueued:
+                    break;
+            }
+            return EnqueueOutcome{};  // 入队成功：没有要上报的
         }
 
         // 每次丢失都上报：spec 的通知面只有 err_handler，靠默认 handler 的限频
@@ -207,46 +171,35 @@ private:
         }
     };
 
-    // 队列里只有消息：序号在入队时分配，flush() 用它表达「刷到哪一条为止」。
-    struct QueuedMessage {
-        Message message;
-        std::size_t sequence;
-    };
-
-    auto validate_config() const -> void {
-        if (queue_capacity_ == 0) {
+    // 配置期校验与「公开枚举 → 队列策略」的唯一映射点。两件事都在工作线程启动之前
+    // 完成：构造失败不会留下半个组件（Registry 依赖这条）。
+    static auto make_queue(std::size_t capacity, OverflowPolicy policy) -> detail::QueueBarrier {
+        if (capacity == 0) {
             ylog_detail_errors::fail_config<std::invalid_argument>("queue_capacity 必须大于 0");
         }
-        switch (overflow_policy_) {
+        switch (policy) {
             case OverflowPolicy::Block:
+                return detail::QueueBarrier(capacity, detail::admission_policy::block);
             case OverflowPolicy::OverrunOldest:
+                return detail::QueueBarrier(capacity, detail::admission_policy::overrun_oldest);
             case OverflowPolicy::DiscardNew:
-                break;
-            default:
-                ylog_detail_errors::fail_config<std::invalid_argument>("未知的 overflow_policy");
+                return detail::QueueBarrier(capacity, detail::admission_policy::discard_new);
         }
+        ylog_detail_errors::fail_config<std::invalid_argument>("未知的 overflow_policy");
+        return detail::QueueBarrier(capacity, detail::admission_policy::block);  // 不可达
     }
 
-    // 入队成功只在这一个地方记录，避免调用点各写一次布尔量。
-    // 调用方持有 mutex_。
-    auto enqueue(Message message, EnqueueOutcome& outcome) -> void {
-        auto reached_flush_level = message.level() >= flush_level();
-        queue_.push_back(QueuedMessage{std::move(message), next_sequence_++});
-        outcome.enqueued = true;
-        if (reached_flush_level) {
-            // flush_on 折算成一次序号屏障请求：生产者不等落盘，也不占队列槽位，
-            // 与 flush() 走同一套机制，因此不会改变它的屏障语义。
-            flush_target_ = std::max(flush_target_, next_sequence_);
+    // 内部策略的公开拼写：组件不保留第二份配置，accessor 从这里翻译回去。
+    static auto public_policy(detail::admission_policy policy) -> OverflowPolicy {
+        switch (policy) {
+            case detail::admission_policy::block:
+                return OverflowPolicy::Block;
+            case detail::admission_policy::overrun_oldest:
+                return OverflowPolicy::OverrunOldest;
+            case detail::admission_policy::discard_new:
+                return OverflowPolicy::DiscardNew;
         }
-        // 不变量：队列里只有消息，长度受容量约束，flush 不占用队列空间。
-        assert(queue_.size() <= queue_capacity_);
-    }
-
-    // 调用方必须持有 mutex_。摘掉最旧的一条（OverrunOldest），返回它的文本供上报。
-    auto evict_oldest_locked() -> std::string {
-        auto text = std::string(queue_.front().message.formatted());
-        queue_.pop_front();
-        return text;
+        return OverflowPolicy::Block;  // 不可达：策略来自构造期校验过的配置
     }
 
     auto report(std::string text) -> void {
@@ -270,65 +223,29 @@ private:
             [this](std::string_view why) { report(std::format("sink flush 失败：{}", why)); });
     }
 
-    // 工作线程：投递队列，按需为目标序号落盘；停止请求后先把队列排空，再退出。
+    // 工作线程：只执行队列交出来的步骤并回报。投递与落盘都在队列锁外，
+    // 「排空到哪一条为止」也不再由这里判断——停止时队列先给完剩余的 deliver，
+    // 最后才给 finished。
     auto run(std::stop_token token) -> void {
         for (;;) {
-            std::unique_lock lock(mutex_);
-            cv_ready_.wait(lock, token,
-                           [this] { return !queue_.empty() || flush_target_ > flushed_sequence_; });
-
-            // flush 请求按序号结算，而不是绑在「队列排空」上：目标之内的消息都写出后
-            // 立刻落盘，flush_on 因此能在那一条之后落盘，flush() 也能更早返回。
-            if (flush_target_ > flushed_sequence_ && processed_sequence_ >= flush_target_) {
-                auto target = flush_target_;
-                lock.unlock();
-                flush_sinks();
-                lock.lock();
-                flushed_sequence_ = std::max(flushed_sequence_, target);
-                cv_flushed_.notify_all();
-                continue;
-            }
-            if (!queue_.empty()) {
-                auto item = std::move(queue_.front());
-                queue_.pop_front();
-                lock.unlock();
-                cv_space_.notify_one();
-                write_to_sinks(item.message);
-                lock.lock();
-                processed_sequence_ = item.sequence + 1;
-                continue;
-            }
-            // 走到这里只剩「已收到停止请求」一种可能：目标序号总是在入队成功后取
-            // 刚分配的那个序号，而队列按 FIFO 写、覆盖策略只删队首，所以目标之内的
-            // 序号要么被写出、要么被更晚的写出顺带推过，processed_sequence_ 必定追上它。
-            assert(flush_target_ <= flushed_sequence_ || token.stop_requested());
-            if (token.stop_requested()) {
-                worker_finished_ = true;
-                lock.unlock();
-                // 唤醒可能仍卡在容量上或 flush 上的调用方，让它们走停止分支而不是继续睡。
-                cv_space_.notify_all();
-                cv_ready_.notify_all();
-                cv_flushed_.notify_all();
-                return;
+            auto step = queue_.next_work(token);
+            switch (step.next) {
+                case detail::work::kind::deliver:
+                    write_to_sinks(*step.message);
+                    queue_.note_delivered(step.sequence);
+                    break;
+                case detail::work::kind::flush:
+                    flush_sinks();
+                    queue_.note_flushed(step.target);
+                    break;
+                case detail::work::kind::finished:
+                    return;
             }
         }
     }
 
-    std::size_t queue_capacity_{8192};
-    OverflowPolicy overflow_policy_{OverflowPolicy::Block};
+    detail::QueueBarrier queue_;
     ErrorHandler err_handler_;
-
-    std::mutex mutex_;
-    std::condition_variable_any cv_ready_;
-    std::condition_variable_any cv_space_;
-    std::condition_variable_any cv_flushed_;
-    std::deque<QueuedMessage> queue_;
-    std::size_t next_sequence_{0};       // 下一个待分配的序号 = 已入队条数
-    std::size_t processed_sequence_{0};  // 已被 worker 写出的条数
-    std::size_t flush_target_{0};        // 当前最高的 flush 目标（0 表示无请求）
-    std::size_t flushed_sequence_{0};    // 已确认落盘的条数
-    bool stopping_{false};
-    bool worker_finished_{false};
     std::mutex join_mutex_;
     std::jthread worker_;
 };

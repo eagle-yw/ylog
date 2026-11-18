@@ -462,6 +462,104 @@ TEST(AsyncLoggerTest, FlushReturnsAfterMessageIsWritten) {
     std::filesystem::remove_all(directory);
 }
 
+// 屏障目标可能落在被覆盖的消息上：被覆盖的那条永远不会写出，屏障只能靠后续消息
+// 把已处理序号推过目标来结清。这条路径此前没有被显式构造过。
+TEST(AsyncLoggerTest, FlushSettlesWhenItsTargetWasOverrun) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .queue_capacity = 1,
+        .overflow_policy = ylog::OverflowPolicy::OverrunOldest,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
+
+    logger.info({}, "a");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)))
+        << "worker 没有进入 write";
+    logger.info({}, "b");  // 占满容量为 1 的队列，随后成为屏障目标的一部分
+    logger.info({}, "c");  // 覆盖 b
+
+    auto flushed = std::binary_semaphore{0};
+    auto flusher = std::jthread([&logger, &flushed] {
+        logger.flush();
+        flushed.release();
+    });
+
+    release.release(2);  // 放行剩下的 a 与 c
+
+    EXPECT_TRUE(flushed.try_acquire_for(std::chrono::milliseconds(2000)))
+        << "屏障目标被覆盖后 flush() 没有结清";
+    flusher.join();
+
+    auto lines = AsyncRecordingSink{state}.snapshot();
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_EQ(lines[0], "a\n");
+    EXPECT_EQ(lines[1], "c\n");
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 1u);
+    EXPECT_NE(reported[0].find("b"), std::string::npos) << reported[0];
+}
+
+// 三个入口交叠：覆盖让屏障目标指向一条不会写出的消息，同时停止请求要求排空。
+// 停止必须既让 flush() 结清、又不把排空丢在半路。
+TEST(AsyncLoggerTest, StopSettlesPendingFlushThatOverrunMadeUnreachable) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async",
+        .queue_capacity = 1,
+        .overflow_policy = ylog::OverflowPolicy::OverrunOldest,
+        .err_handler = reports.handler(),
+        .sinks =
+            ylog::make_sinks(ylog::AnySink{GatedRecordingSink{state, &entered, &release}, "%v"})});
+
+    logger.info({}, "a");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)))
+        << "worker 没有进入 write";
+    logger.info({}, "b");
+    logger.info({}, "c");  // 覆盖 b：屏障目标里有一条不会再写出
+
+    auto flushed = std::binary_semaphore{0};
+    auto flusher = std::jthread([&logger, &flushed] {
+        logger.flush();
+        flushed.release();
+    });
+
+    auto stopped = std::binary_semaphore{0};
+    auto stopper = std::jthread([&logger, &stopped] {
+        logger.stop();
+        stopped.release();
+    });
+
+    release.release(2);  // 放行 a 与 c，排空随即可以走完
+
+    EXPECT_TRUE(flushed.try_acquire_for(std::chrono::milliseconds(2000)))
+        << "停止期间未结清的屏障没有唤醒等待者";
+    EXPECT_TRUE(stopped.try_acquire_for(std::chrono::milliseconds(2000)))
+        << "stop() 没有排空并返回";
+
+    flusher.join();
+    stopper.join();
+
+    auto lines = AsyncRecordingSink{state}.snapshot();
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_EQ(lines[0], "a\n");
+    EXPECT_EQ(lines[1], "c\n");
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 1u);
+    EXPECT_NE(reported[0].find("b"), std::string::npos) << reported[0];
+}
+
 TEST(AsyncLoggerTest, FlushIsABarrierForEachProducingThread) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
