@@ -1,5 +1,3 @@
-enable_testing()
-
 include(FetchContent)
 
 FetchContent_Declare(
@@ -17,3 +15,5 @@ target_link_libraries(unit_test
     gtest_main
     ylog
 )
+
+add_test(NAME unit_test COMMAND unit_test)

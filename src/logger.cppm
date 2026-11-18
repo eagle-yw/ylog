@@ -3,112 +3,137 @@ export module ylog:logger;
 import std;
 import :level;
 import :message;
+import :formatter;
 import :sink;
 import :sink.stdout;
-
 
 namespace ylog {
 
 export class Logger {
 public:
-    Logger() {
-        level_ = Level::Info;
-        name_ = "Logger";
-        
-        
-        sinks_.emplace_back(SinksStdout());
-        
-        
-        // append_sink(SinksStdout());
+    explicit Logger(std::string name)
+        : name_(std::move(name)) {
+        sinks_.emplace_back(StdoutSink{});
     }
 
-    void debug(FmtLoc fmt_loc, auto &&...args) {
-        log(Level::Debug, fmt_loc, std::forward<decltype(args)>(args)...);
-    }
+    auto name() const -> std::string_view { return name_; }
+    auto level() const -> Level { return level_.load(std::memory_order_relaxed); }
+    auto set_level(Level target) -> void { level_.store(target, std::memory_order_relaxed); }
 
-    void info(FmtLoc fmt_loc, auto &&...args) {
-        log(Level::Info, fmt_loc, std::forward<decltype(args)>(args)...);
-    }
-
-    void warning(FmtLoc fmt_loc, auto &&...args) {
-        log(Level::Warning, fmt_loc, std::forward<decltype(args)>(args)...);
-    }
-
-    void error(FmtLoc fmt_loc, auto &&...args) {
-        log(Level::Error, fmt_loc, std::forward<decltype(args)>(args)...);
-    }
-
-    void set_level(const Level level) {
-        level_ = level;
-    }
-
+    // 追加 sink，可为其单独指定 pattern（formatter 归属 sink）。
     template <Sink T>
-    void append_sink(T&& sink) {
-        sinks_.emplace_back(std::forward<T>(sink));
+    auto append_sink(T&& sink, std::string_view pattern = default_pattern) -> void {
+        sinks_.emplace_back(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern));
+    }
+
+    // 追加 sink 并注入配置好的 formatter（可带自定义 flag）。
+    template <Sink T>
+    auto append_sink(T&& sink, std::unique_ptr<Formatter> formatter) -> void {
+        sinks_.emplace_back(std::forward<T>(sink), std::move(formatter));
+    }
+
+    // 为所有 sink 设置 pattern（扇出）。
+    auto set_pattern(std::string_view pattern) -> void {
+        for (auto& sink : sinks_) {
+            sink.set_pattern(pattern);
+        }
+    }
+
+    auto flush() -> void {
+        for (auto& sink : sinks_) {
+            sink.flush();
+        }
+    }
+
+    // 核心日志入口。SourceLocation 默认参数在调用点捕获位置。
+    // Logger 只负责生成 Message，格式化由各 sink 自己的 formatter 完成。
+    template <typename... Args>
+    auto log(SourceLocation location, Level level,
+             std::format_string<Args...> format, Args&&... args) -> void {
+        if (!should_log(level)) {
+            return;
+        }
+        auto user_message = std::format(format, std::forward<Args>(args)...);
+        auto message = Message(level, name_, location, user_message);
+        for (auto& sink : sinks_) {
+            sink.write(message);
+        }
+    }
+
+    // 各级别便捷方法。第一个参数 {} 自动捕获调用点。
+    // 结构化日志直接用 reflected：logger.info({}, "{}", reflected(point))。
+    template <typename... Args>
+    auto trace(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+        log(loc, Level::Trace, fmt, std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    auto debug(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+        log(loc, Level::Debug, fmt, std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    auto info(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+        log(loc, Level::Info, fmt, std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    auto warning(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+        log(loc, Level::Warning, fmt, std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    auto error(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+        log(loc, Level::Error, fmt, std::forward<Args>(args)...);
+    }
+    template <typename... Args>
+    auto critical(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+        log(loc, Level::Critical, fmt, std::forward<Args>(args)...);
     }
 
 private:
-    bool level_is_enabled(Level msg_level) {
+    auto should_log(Level msg_level) const -> bool {
         return msg_level >= level_.load(std::memory_order_relaxed);
     }
 
-    void log(Level level, FmtLoc loc_fmt, auto &&...args){
-        bool log_enabled = level_is_enabled(level);
-        if(!log_enabled){
-            return;
-        }
-
-        auto input_msg = std::string();        
-        std::vformat_to(std::back_inserter(input_msg), loc_fmt.fmt, std::make_format_args(args...));
-        auto log_msg = Message(level, loc_fmt, name_, std::move(input_msg));
-
-        log_it(log_msg);
-    }
-
-    void log_it(Message log_msg) {
-        //todo
-        auto msg_str = log_msg.format();
-        
-        for(auto& sink : sinks_){
-            sink.write(msg_str);
-        }
-        // std::cout << msg_str;
-        // std::print("{}",log_msg.format());
-    }
-
-    std::atomic<Level> level_;
     std::string name_;
-    std::vector<ylog::SinkIface> sinks_;    
+    std::atomic<Level> level_{Level::Info};
+    std::vector<AnySink> sinks_;
 };
 
-Logger& getDefaultLogger() {
-    static auto default_logger = Logger();
-    return default_logger;
+export auto default_logger() -> Logger& {
+    static Logger logger("default");
+    return logger;
 }
 
-export void debug(FmtLoc fmt_loc, auto &&...args){
-    getDefaultLogger().debug(fmt_loc, std::forward<decltype(args)>(args)...);
+export auto set_level(Level target) -> void { default_logger().set_level(target); }
+export auto set_pattern(std::string_view pattern) -> void { default_logger().set_pattern(pattern); }
+
+export template <typename... Args>
+auto log(SourceLocation loc, Level level,
+         std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, level, fmt, std::forward<Args>(args)...);
 }
 
-export void info(FmtLoc fmt_loc, auto &&...args){
-    getDefaultLogger().info(fmt_loc, std::forward<decltype(args)>(args)...);
+export template <typename... Args>
+auto trace(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, Level::Trace, fmt, std::forward<Args>(args)...);
+}
+export template <typename... Args>
+auto debug(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, Level::Debug, fmt, std::forward<Args>(args)...);
+}
+export template <typename... Args>
+auto info(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, Level::Info, fmt, std::forward<Args>(args)...);
+}
+export template <typename... Args>
+auto warning(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, Level::Warning, fmt, std::forward<Args>(args)...);
+}
+export template <typename... Args>
+auto error(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, Level::Error, fmt, std::forward<Args>(args)...);
+}
+export template <typename... Args>
+auto critical(SourceLocation loc, std::format_string<Args...> fmt, Args&&... args) -> void {
+    default_logger().log(loc, Level::Critical, fmt, std::forward<Args>(args)...);
 }
 
-export void warning(FmtLoc fmt_loc, auto &&...args){
-    getDefaultLogger().warning(fmt_loc, std::forward<decltype(args)>(args)...);
-}
-
-export void error(FmtLoc fmt_loc, auto &&...args){
-    getDefaultLogger().error(fmt_loc, std::forward<decltype(args)>(args)...);
-}
-
-export void set_level(const Level level){
-    getDefaultLogger().set_level(level);
-}
-
-export template <Sink T>
-void append_sink(T&& sink){
-    getDefaultLogger().append_sink(std::forward<T>(sink));
-}
-
-} // namespace ylog end
+} // namespace ylog

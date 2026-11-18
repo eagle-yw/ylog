@@ -1,79 +1,137 @@
-
 export module ylog:message;
-
 
 import std;
 import :level;
 
 namespace ylog {
 
+// 源位置。默认构造即在调用点捕获位置，无需宏。
+// 用法：logger.info({}, "msg {}", value) —— {} 触发默认构造捕获。
+export struct SourceLocation {
+    std::string_view file;
+    std::uint32_t line;
+    std::string_view function;
 
-
-static std::array<std::string, 4> level_strs = {
-    "debug",
-    "info",
-    "warning",
-    "error"
+    SourceLocation(std::source_location loc = std::source_location::current())
+        : file(loc.file_name()),
+          line(loc.line()),
+          function(loc.function_name()) {}
 };
 
-// Format with source location
-struct FmtLoc {
-    FmtLoc(
-        const char* fmt, 
-        const std::source_location& loc = std::source_location::current()
-    ): fmt(fmt), loc(loc){}
-    
-    const char* fmt;
-    const std::source_location& loc;    
+// 编译期由反射生成的字段格式串元信息。
+// 例如 struct Point { int x; double y; }; -> "x={} y={}"
+namespace detail {
+
+consteval auto make_field_format(std::meta::info type_info) -> std::meta::info {
+    std::string result;
+    auto members = std::meta::nonstatic_data_members_of(
+        type_info, std::meta::access_context::unchecked());
+    bool first = true;
+    for (std::meta::info member : members) {
+        if (!first) {
+            result += " ";
+        }
+        result += std::meta::identifier_of(member);
+        result += "={}";
+        first = false;
+    }
+    return std::meta::reflect_constant_string(result);
+}
+
+template <typename T>
+inline constexpr auto field_format_value = std::string_view([:make_field_format(^^T):]);
+
+// 结构体字段数量（编译期）。
+template <typename T>
+consteval auto member_count() -> std::size_t {
+    return std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()).size();
+}
+
+// 第 N 个字段的反射信息（供 splice 使用）。
+template <typename T, std::size_t N>
+consteval auto nth_member() -> std::meta::info {
+    auto members = std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked());
+    return members[N];
+}
+
+template <typename T>
+auto to_tuple_impl(const T& object) {
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+        return std::tuple{object.[:nth_member<T, Is>():]...};
+    }(std::make_index_sequence<member_count<T>()>{});
+}
+
+} // namespace detail
+
+// 供用户调用的编译期格式串生成器；反射信息留在 detail 内部。
+export template <typename T>
+consteval auto field_format() -> std::string_view {
+    return detail::field_format_value<T>;
+}
+
+// 将聚合类型展开为字段 tuple。
+export template <typename T>
+auto to_tuple(const T& object) {
+    return detail::to_tuple_impl(object);
+}
+
+// 反射包装器：让任意聚合类型可直接用于 std::format / std::println。
+// 用法：std::println("{}", ylog::reflected(point));
+export template <typename T>
+struct Reflected {
+    const T& value;
 };
 
-class Message {
+export template <typename T>
+auto reflected(const T& object) -> Reflected<T> {
+    return Reflected<T>{object};
+}
+
+// 日志消息：在构造时完成格式化，供 sink 消费。
+export class Message {
 public:
-    Message(Level level, FmtLoc fmt_loc, std::string_view logger_name, std::string&& msg)
-    : fmt_loc_(fmt_loc){
-        
-        this->logger_name_ = logger_name;
-        this->level_ = level;
-        this->msg_ = msg;
-        this->time_ = std::chrono::system_clock::now();
-    }
+    Message(Level level,
+            std::string_view logger_name,
+            SourceLocation location,
+            std::string_view formatted)
+        : level_(level),
+          logger_name_(logger_name),
+          location_(location),
+          formatted_(formatted),
+          timestamp_(std::chrono::system_clock::now()) {}
 
-    std::string format() const {
-        auto p = std::filesystem::path(fmt_loc_.loc.file_name());
-        auto filename = p.filename().string();
-        auto str = std::format("{} [{}] [{}:{}] {}\n",
-            str_time(), 
-            str_level(), 
-            filename, 
-            fmt_loc_.loc.line(), 
-            msg_
-        );
-        return str;
-    }
+    auto level() const -> Level { return level_; }
+    auto logger_name() const -> std::string_view { return logger_name_; }
+    auto location() const -> const SourceLocation& { return location_; }
+    auto formatted() const -> std::string_view { return formatted_; }
+    auto timestamp() const -> std::chrono::system_clock::time_point { return timestamp_; }
 
 private:
-    std::string str_time() const{
-        auto epoch  = time_.time_since_epoch();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(epoch).count() % 1000;
-        std::time_t time_t_value = std::chrono::system_clock::to_time_t(time_);
-        std::tm local_time = *std::localtime(&time_t_value);
-        std::ostringstream oss;
-        oss << std::put_time(&local_time, "%Y-%m-%d %H:%M:%S");
-  
-        return std::format("{}.{:03}", oss.str(), ms);            
-    }
-
-    std::string_view str_level() const{
-        return level_strs[static_cast<int>(level_)];
-    }
-    
-    
-    std::chrono::system_clock::time_point time_;
-    std::string_view logger_name_;
-    std::string msg_;
-    
     Level level_;
-    FmtLoc fmt_loc_;
+    std::string logger_name_;
+    SourceLocation location_;
+    std::string formatted_;
+    std::chrono::system_clock::time_point timestamp_;
 };
 
-}
+} // namespace ylog
+
+// std::formatter 特化：让 Reflected<T> 可直接用于 std::format / println。
+template <typename T>
+struct std::formatter<ylog::Reflected<T>> {
+    template <typename ParseContext>
+    constexpr auto parse(ParseContext& context) {
+        return context.begin();
+    }
+
+    template <typename FormatContext>
+    auto format(const ylog::Reflected<T>& reflected, FormatContext& context) const {
+        auto fields = ylog::to_tuple(reflected.value);
+        return std::apply(
+            [&context](auto&&... args) {
+                return std::vformat_to(context.out(), ylog::detail::field_format_value<T>,
+                                       std::make_format_args(args...));
+            },
+            fields);
+    }
+};

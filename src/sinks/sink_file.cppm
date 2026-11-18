@@ -1,47 +1,36 @@
 export module ylog:sink.file;
 
 import std;
+import :sink;
+import ylog_detail_errors;
 
 namespace ylog {
-export class SinkFile {
+
+// 输出到文件。实现 Sink 概念。
+export class FileSink {
 public:
-
-	SinkFile(const std::string_view& filename){        
-        stream_ = std::make_unique<std::ofstream>(filename);
-        if (!stream_->is_open()) {
-            auto err_msg = std::format("Failed to open file: {}", filename);
-            throw std::ios_base::failure(err_msg);
+    explicit FileSink(std::string_view filename)
+        : stream_(std::string(filename)) {
+        if (!stream_.is_open()) {
+            ylog_detail_errors::fail_config<std::ios_base::failure>(
+                std::format("Failed to open log file: {}", filename));
         }
     }
 
-    SinkFile(const SinkFile&) = delete;
-    SinkFile& operator=(const SinkFile&) = delete;
-    
-    SinkFile(SinkFile&& other) noexcept {
-        this->stream_ = std::move(other.stream_);
+    FileSink(const FileSink&) = delete;
+    auto operator=(const FileSink&) -> FileSink& = delete;
+    FileSink(FileSink&&) noexcept = default;
+    auto operator=(FileSink&&) noexcept -> FileSink& = default;
+    ~FileSink() = default;
+
+    auto write(std::string_view line) -> void {
+        stream_.write(line.data(), static_cast<std::streamsize>(line.size()));
     }
 
-    SinkFile& operator=(SinkFile&& other) noexcept {
-        if (this != &other) { 
-            SinkFile temp(std::move(other));
-            *this = std::move(temp);  
-        }
-        return *this;
-    }
-
-
-	~SinkFile(){
-        if(stream_){
-            stream_->close();
-        }
-    }
-
-	void write(std::string_view message){
-        *stream_ << message;
-    }
+    auto flush() -> void { stream_.flush(); }
 
 private:
-    std::unique_ptr<std::ofstream> stream_ = nullptr;
+    std::ofstream stream_;
 };
 
-}
+} // namespace ylog

@@ -2,18 +2,29 @@
     "version": 8,
     "configurePresets": [
         {
-            "name": "clang18",
-            "displayName": "Clang 18.1.8 x86_64-pc-linux-gnu",
-            "description": "使用编译器: C = /usr/sbin/clang, CXX = /usr/sbin/clang++",
+            "name": "gcc16",
+            "displayName": "GCC 16.2.1 x86_64-pc-linux-gnu",
+            "description": "正在使用编译器: C = /usr/sbin/gcc, CXX = /usr/sbin/g++",
             "generator": "Ninja",
-            "binaryDir": "${sourceDir}/build",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+                "CMAKE_C_COMPILER": "/usr/sbin/gcc",
+                "CMAKE_CXX_COMPILER": "/usr/sbin/g++",
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "clang",
+            "displayName": "Clang 23.1.5 (供 clangd 使用)",
+            "description": "生成 clangd 所需的编译数据库与模块 BMI；clangd 版本须与 clang 一致",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
                 "CMAKE_C_COMPILER": "/usr/sbin/clang",
                 "CMAKE_CXX_COMPILER": "/usr/sbin/clang++",
-                "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
-                "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/toolchain/clang-toolchain.cmake",
-                "CMAKE_EXPORT_COMPILE_COMMANDS":true
+                "CMAKE_BUILD_TYPE": "Debug"
             }
         }
     ]
