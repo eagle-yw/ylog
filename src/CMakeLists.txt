@@ -12,4 +12,6 @@ target_sources(ylog
     sinks/sink.cppm
     sinks/sink_stdout.cppm
     sinks/sink_file.cppm
+    sinks/sink_file_rotating.cppm
+    sinks/sink_file_daily.cppm
 )
