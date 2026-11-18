@@ -8,24 +8,6 @@ namespace ylog {
 
 namespace detail {
 
-struct daily_error_state {
-    std::mutex mutex;
-    std::chrono::steady_clock::time_point last_report{};
-};
-
-inline auto make_default_daily_err_handler() -> std::function<void(std::string_view)> {
-    auto state = std::make_shared<daily_error_state>();
-    return [state](std::string_view message) {
-        auto lock = std::lock_guard(state->mutex);
-        auto now = std::chrono::steady_clock::now();
-        if (now - state->last_report < std::chrono::seconds{1}) {
-            return;
-        }
-        state->last_report = now;
-        std::println(std::cerr, "[ylog] {}", message);
-    };
-}
-
 inline auto fail_daily_config(std::string_view reason) -> void {
     ylog_detail_errors::fail_config(std::format("DailyFileSink: {}", reason));
 }
@@ -116,7 +98,8 @@ export struct DailyFileConfig {
     std::string filename;
     std::size_t max_files{7};
     bool truncate_on_open{false};
-    std::function<void(std::string_view)> err_handler{detail::make_default_daily_err_handler()};
+    std::function<void(std::string_view)> err_handler{
+        ylog_detail_errors::make_default_err_handler()};
     std::function<std::chrono::system_clock::time_point()> clock{std::chrono::system_clock::now};
 };
 

@@ -1,7 +1,8 @@
 # Ylog
 
 C++26 模块化日志库：`Logger` / `AsyncLogger` / `Registry`，pattern formatter，
-stdout / 文件 / 大小轮转 / 按日 sink。设计取舍见 `docs/adr/`，术语见 `GLOSSARY.md`。
+stdout / 任意 ostream / 文件 / 大小轮转 / 按日 sink，以及丢弃全部输出的 `NullSink`。
+设计取舍见 `docs/adr/`，术语见 `GLOSSARY.md`。
 
 ## 构建要求
 

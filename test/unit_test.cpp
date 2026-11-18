@@ -1,5 +1,10 @@
 #include "gtest/gtest.h"
 
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 import std;
 import ylog;
 
@@ -81,6 +86,12 @@ auto read_all(const std::filesystem::path& path) -> std::string {
     auto input = std::ifstream(path, std::ios::binary);
     return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
+
+// 一点字节都不接受的底层：让任何写入都以 badbit 失败，用来验证热路径的失败上报。
+struct FailingStreambuf : std::streambuf {
+    auto xsputn(const char*, std::streamsize) -> std::streamsize override { return 0; }
+    auto overflow(int_type) -> int_type override { return traits_type::eof(); }
+};
 
 }  // namespace
 
@@ -549,6 +560,66 @@ TEST(LoggerTest, FileSink) {
     std::filesystem::remove_all(directory);
 }
 
+TEST(FileSinkTest, RejectsEmptyFilenameAtConfiguration) {
+    static_assert(ylog::Sink<ylog::FileSink>);
+
+    EXPECT_THROW({ auto sink = ylog::FileSink(ylog::FileConfig{}); }, std::invalid_argument);
+}
+
+TEST(FileSinkTest, RejectsUnopenablePathAtConfiguration) {
+    auto directory = temp_test_path("file-open-failure");
+    auto config = ylog::FileConfig{.filename = (directory / "app.log").string()};
+
+    EXPECT_THROW({ auto sink = ylog::FileSink(config); }, std::invalid_argument);
+}
+
+TEST(FileSinkTest, AppendsByDefaultAndTruncatesOnRequest) {
+    auto directory = temp_test_path("file-append");
+    std::filesystem::create_directories(directory);
+    auto path = directory / "app.log";
+
+    {
+        auto sink = ylog::FileSink(ylog::FileConfig{.filename = path.string()});
+        sink.write("first\n");
+        sink.flush();
+    }
+    {
+        auto sink = ylog::FileSink(ylog::FileConfig{.filename = path.string()});
+        sink.write("second\n");
+        sink.flush();
+    }
+    EXPECT_EQ(read_all(path), "first\nsecond\n");
+
+    {
+        auto sink =
+            ylog::FileSink(ylog::FileConfig{.filename = path.string(), .truncate_on_open = true});
+        sink.write("third\n");
+        sink.flush();
+    }
+    EXPECT_EQ(read_all(path), "third\n");
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST(FileSinkTest, ReportsHotPathFailureOnce) {
+    if (!std::filesystem::exists("/dev/full")) {
+        GTEST_SKIP() << "/dev/full is unavailable";
+    }
+
+    auto failures = 0;
+    auto config = ylog::FileConfig{.filename = "/dev/full"};
+    config.err_handler = [&failures](std::string_view) { ++failures; };
+
+    auto sink = ylog::FileSink(config);
+    EXPECT_NO_THROW({
+        sink.write("first\n");
+        sink.flush();
+        sink.write("second\n");
+        sink.flush();
+    });
+    EXPECT_EQ(failures, 1);
+}
+
 TEST(RegistryTest, CreateAndGet) {
     auto& registry = ylog::Registry::instance();
     auto& logger = registry.create("test-app");
@@ -577,6 +648,163 @@ TEST(SinkTest, ConceptCheck) {
     };
     static_assert(ylog::Sink<GoodSink>);
     static_assert(!ylog::Sink<BadSink>);
+}
+
+TEST(SinkTest, NullSinkWritesNothingAnywhere) {
+    static_assert(ylog::Sink<ylog::NullSink>);
+
+    auto to_stdout = std::ostringstream{};
+    auto to_stderr = std::ostringstream{};
+    auto* saved_out = std::cout.rdbuf(to_stdout.rdbuf());
+    auto* saved_err = std::cerr.rdbuf(to_stderr.rdbuf());
+
+    auto sink = ylog::AnySink(ylog::NullSink{}, std::make_unique<ylog::PatternFormatter>("%v"));
+    sink.write(ylog::Message(ylog::Level::Info, "n", {}, "dropped"));
+    sink.flush();
+
+    std::cout.rdbuf(saved_out);
+    std::cerr.rdbuf(saved_err);
+    EXPECT_TRUE(to_stdout.str().empty());
+    EXPECT_TRUE(to_stderr.str().empty());
+}
+
+TEST(SinkTest, NullSinkDoesNotChangeOtherLoggerBehaviour) {
+    auto output = std::string{};
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view line) -> void { out->append(line); }
+    };
+
+    auto logger = ylog::Logger("null-sink");
+    logger.set_level(ylog::Level::Info);
+    logger.append_sink(ylog::NullSink{}, "%v");
+    logger.append_sink(Capture{&output}, "%v");
+
+    logger.debug({}, "filtered");
+    logger.info({}, "kept");
+    logger.flush();
+
+    EXPECT_EQ(output, "kept\n");
+}
+
+TEST(SinkTest, ColorModeIsAnOptionalSinkProtocol) {
+    struct ColoringSink {
+        auto write(std::string_view) -> void {}
+        auto color_mode() const -> ylog::ColorMode { return ylog::ColorMode::Always; }
+    };
+
+    auto plain = ylog::AnySink(ylog::NullSink{});
+    EXPECT_EQ(plain.color_mode(), ylog::ColorMode::Never);
+
+    auto coloring = ylog::AnySink(ColoringSink{});
+    EXPECT_EQ(coloring.color_mode(), ylog::ColorMode::Always);
+}
+
+TEST(OstreamSinkTest, WritesCompleteLineToTheStream) {
+    static_assert(ylog::Sink<ylog::OstreamSink>);
+
+    auto captured = std::ostringstream{};
+    auto sink = ylog::OstreamSink(ylog::OstreamConfig{.stream = &captured});
+
+    sink.write("alpha\n");
+    sink.write("beta\n");
+    sink.flush();
+
+    EXPECT_EQ(captured.str(), "alpha\nbeta\n");
+}
+
+TEST(OstreamSinkTest, RejectsNullStreamAtConfiguration) {
+    EXPECT_THROW({ auto sink = ylog::OstreamSink(ylog::OstreamConfig{}); }, std::invalid_argument);
+}
+
+TEST(OstreamSinkTest, ColorModeIsResolvedAtConfiguration) {
+    auto captured = std::ostringstream{};
+
+    auto defaults = ylog::OstreamSink(ylog::OstreamConfig{.stream = &captured});
+    auto automatic = ylog::OstreamSink(
+        ylog::OstreamConfig{.stream = &captured, .color = ylog::ColorMode::Automatic});
+    auto always = ylog::OstreamSink(
+        ylog::OstreamConfig{.stream = &captured, .color = ylog::ColorMode::Always});
+
+    EXPECT_EQ(defaults.color_mode(), ylog::ColorMode::Never);
+    // 非终端 stream（含 ostringstream）在 Automatic 下不着色。
+    EXPECT_EQ(automatic.color_mode(), ylog::ColorMode::Never);
+    EXPECT_EQ(always.color_mode(), ylog::ColorMode::Always);
+}
+
+TEST(OstreamSinkTest, ReportsWriteFailureOnce) {
+    auto failures = std::vector<std::string>{};
+    auto failing = FailingStreambuf{};
+    auto stream = std::ostream(&failing);
+
+    auto sink = ylog::OstreamSink(ylog::OstreamConfig{
+        .stream = &stream,
+        .err_handler = [&failures](std::string_view message) { failures.emplace_back(message); },
+    });
+
+    EXPECT_NO_THROW(sink.write("first\n"));
+    EXPECT_NO_THROW(sink.write("second\n"));
+    EXPECT_EQ(failures.size(), 1);
+}
+
+TEST(StdoutSinkTest, WritesLineVerbatimWithDefaults) {
+    static_assert(ylog::Sink<ylog::StdoutSink>);
+
+    auto captured = std::ostringstream{};
+    auto* original = std::cout.rdbuf(captured.rdbuf());
+
+    auto sink = ylog::StdoutSink{};
+    sink.write("plain line\n");
+    sink.flush();
+
+    std::cout.rdbuf(original);
+    EXPECT_EQ(captured.str(), "plain line\n");
+}
+
+TEST(StdoutSinkTest, ReportsConfiguredColorMode) {
+    auto never = ylog::StdoutSink(ylog::StdoutConfig{.color = ylog::ColorMode::Never});
+    auto always = ylog::StdoutSink(ylog::StdoutConfig{.color = ylog::ColorMode::Always});
+
+    EXPECT_EQ(never.color_mode(), ylog::ColorMode::Never);
+    EXPECT_EQ(always.color_mode(), ylog::ColorMode::Always);
+}
+
+#if !defined(_WIN32)
+TEST(StdoutSinkTest, AutomaticResolvesToNeverWhenStdoutIsRedirected) {
+    auto path = temp_test_path("stdout-redirect");
+    auto descriptor = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    ASSERT_NE(descriptor, -1) << "cannot open " << path.string();
+    auto saved = ::dup(STDOUT_FILENO);
+    ASSERT_NE(saved, -1);
+    ASSERT_NE(::dup2(descriptor, STDOUT_FILENO), -1);
+
+    // 探测定型发生在构造期：重定向之后再构造的 sink 应当已经知道不该上色。
+    auto mode = ylog::StdoutSink{}.color_mode();
+
+    ::dup2(saved, STDOUT_FILENO);
+    ::close(saved);
+    ::close(descriptor);
+    std::filesystem::remove(path);
+
+    EXPECT_EQ(mode, ylog::ColorMode::Never);
+}
+#endif
+
+TEST(StdoutSinkTest, ReportsWriteFailureOnce) {
+    auto failures = std::vector<std::string>{};
+    auto config = ylog::StdoutConfig{};
+    config.err_handler = [&failures](std::string_view message) { failures.emplace_back(message); };
+
+    auto failing = FailingStreambuf{};
+    auto* original = std::cout.rdbuf(&failing);
+
+    auto sink = ylog::StdoutSink(config);
+    EXPECT_NO_THROW(sink.write("first\n"));
+    EXPECT_NO_THROW(sink.write("second\n"));
+
+    std::cout.rdbuf(original);
+    std::cout.clear();
+    EXPECT_EQ(failures.size(), 1);
 }
 
 TEST(SinkConcurrencyTest, ConcurrentWritesKeepEveryLineIntact) {

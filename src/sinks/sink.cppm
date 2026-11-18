@@ -14,6 +14,21 @@ concept Sink = requires(T& sink, std::string_view line) {
     { sink.write(line) } -> std::same_as<void>;
 };
 
+// 颜色是 sink 的配置而不是 sink 的种类。上色动作由 AnySink 执行（只有 formatter 知道
+// 颜色区间，sink 只拿到一行字符串），sink 侧用可选协议 color_mode() 声明自己的意愿。
+export enum class ColorMode {
+    Never,
+    Automatic,
+    Always,
+};
+
+// 丢弃所有行。无配置、无状态：用于基准测试，或临时关掉某个目的地。
+// 不提供 flush()，顺带验证 Sink 协议的可选部分。
+export class NullSink {
+public:
+    auto write(std::string_view) -> void {}
+};
+
 namespace detail {
 
 // 每条日志落到本线程的暂存缓冲：格式化在输出锁之外完成，无法复用 sink 内的
@@ -98,11 +113,15 @@ public:
         return formatter_->pattern();
     }
 
+    // 底层 sink 声明的颜色模式；没有声明该协议的 sink 视为永不着色。
+    auto color_mode() const -> ColorMode { return model_->color_mode(); }
+
 private:
     struct Concept {
         virtual ~Concept() = default;
         virtual auto write(std::string_view) -> void = 0;
         virtual auto flush() -> void = 0;
+        virtual auto color_mode() const -> ColorMode = 0;
     };
 
     template <Sink T>
@@ -113,6 +132,13 @@ private:
         auto flush() -> void override {
             if constexpr (requires { sink_.flush(); }) {
                 sink_.flush();
+            }
+        }
+        auto color_mode() const -> ColorMode override {
+            if constexpr (requires { sink_.color_mode(); }) {
+                return sink_.color_mode();
+            } else {
+                return ColorMode::Never;
             }
         }
         T sink_;

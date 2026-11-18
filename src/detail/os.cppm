@@ -4,7 +4,9 @@
 module;
 
 #if defined(_WIN32)
+#include <io.h>
 #include <process.h>
+#include <stdio.h>
 #include <time.h>
 #include <windows.h>
 #else
@@ -56,6 +58,24 @@ export auto utc_offset_minutes(const std::tm& time) -> int {
     return static_cast<int>((utc_seconds - local_seconds) / 60);
 #else
     return static_cast<int>(time.tm_gmtoff / 60);
+#endif
+}
+
+// stdout / stderr 是否连着终端。颜色只在终端上有意义，所以 Automatic 在配置期用这里
+// 定型一次，热路径不再调用 isatty；不区分终端是否支持颜色（不做 Windows 控制台 API）。
+export auto stdout_is_tty() -> bool {
+#if defined(_WIN32)
+    return ::_isatty(::_fileno(stdout)) != 0;
+#else
+    return ::isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+export auto stderr_is_tty() -> bool {
+#if defined(_WIN32)
+    return ::_isatty(::_fileno(stderr)) != 0;
+#else
+    return ::isatty(STDERR_FILENO) != 0;
 #endif
 }
 

@@ -30,6 +30,26 @@ auto fail_config(std::string_view reason) -> void {
     }
 }
 
+// 各 sink 配置结构体的默认 err_handler：故障时写 stderr，同一秒内只报一次。
+// 默认值集中在这里，避免每个 sink 各带一份限频状态（ADR-0009）。
+export auto make_default_err_handler() -> std::function<void(std::string_view)> {
+    struct state {
+        std::mutex mutex;
+        std::chrono::steady_clock::time_point last_report{};
+    };
+
+    auto shared = std::make_shared<state>();
+    return [shared](std::string_view message) {
+        auto lock = std::lock_guard(shared->mutex);
+        auto now = std::chrono::steady_clock::now();
+        if (now - shared->last_report < std::chrono::seconds{1}) {
+            return;
+        }
+        shared->last_report = now;
+        std::println(std::cerr, "[ylog] {}", message);
+    };
+}
+
 export template <bool Enabled = exceptions_enabled, class F>
 auto safe_err_handler(F&& handler, std::string_view message) -> void {
     if constexpr (Enabled) {

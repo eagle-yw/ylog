@@ -16,6 +16,9 @@ _Avoid_: 调用点、调用位置
 **Sink**：日志条目的输出目的地；通过 `Sink` concept 约束，决定一条已格式化的消息送往何处。
 _Avoid_: 输出器、handler、destination
 
+**ColorMode**：Sink 对颜色的态度。`Never` 永不着色，`Always` 始终着色，`Automatic` 在配置期按输出是否连着终端定型为前两者之一。上色由 `AnySink` 执行，Sink 只用可选的 `color_mode()` 声明模式。
+_Avoid_: 彩色输出、color scheme
+
 **Formatter**：将 `Message` 按模式转换为输出文本的规则。
 _Avoid_: 格式器、layout、pattern engine
 
