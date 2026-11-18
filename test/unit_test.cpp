@@ -1163,6 +1163,239 @@ TEST(FileSinkIntegrationTest, WorksWithLoggerAndCustomFlags) {
     std::filesystem::remove_all(directory);
 }
 
+namespace {
+
+// 异步组件的观察点：sink 侧记录行内容并通知，测试据此等待，不 sleep 轮询。
+struct AsyncRecordingSink {
+    struct State {
+        std::mutex mutex;
+        std::condition_variable changed;
+        std::vector<std::string> lines;
+    };
+
+    std::shared_ptr<State> state;
+
+    auto write(std::string_view line) -> void {
+        {
+            std::lock_guard lock(state->mutex);
+            state->lines.emplace_back(line);
+        }
+        state->changed.notify_all();
+    }
+
+    auto flush() -> void {}
+
+    auto wait_for(std::size_t count, std::chrono::milliseconds timeout) -> bool {
+        std::unique_lock lock(state->mutex);
+        return state->changed.wait_for(lock, timeout, [this, count] {
+            return state->lines.size() >= count;
+        });
+    }
+
+    auto snapshot() -> std::vector<std::string> {
+        std::lock_guard lock(state->mutex);
+        return state->lines;
+    }
+};
+
+} // namespace
+
+TEST(AsyncLoggerTest, ConfigDefaultsMatchTheSpec) {
+    auto config = ylog::AsyncLoggerConfig{.name = "async"};
+
+    EXPECT_EQ(config.level, ylog::Level::Info);
+    EXPECT_EQ(config.queue_capacity, std::size_t{8192});
+    EXPECT_EQ(config.overflow_policy, ylog::OverflowPolicy::Block);
+    EXPECT_TRUE(static_cast<bool>(config.err_handler));
+}
+
+TEST(AsyncLoggerTest, RejectsZeroQueueCapacity) {
+    auto config = ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 0};
+
+    EXPECT_THROW(ylog::AsyncLogger{config}, std::invalid_argument);
+}
+
+TEST(AsyncLoggerTest, RejectsUnknownOverflowPolicy) {
+    auto config = ylog::AsyncLoggerConfig{.name = "async"};
+    config.overflow_policy = static_cast<ylog::OverflowPolicy>(42);
+
+    EXPECT_THROW(ylog::AsyncLogger{config}, std::invalid_argument);
+}
+
+TEST(AsyncLoggerTest, ExposesNameAndLevel) {
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+
+    EXPECT_EQ(logger.name(), "async");
+    EXPECT_EQ(logger.level(), ylog::Level::Info);
+
+    logger.set_level(ylog::Level::Warning);
+
+    EXPECT_EQ(logger.level(), ylog::Level::Warning);
+}
+
+TEST(AsyncLoggerTest, DeliversMessageToItsSink) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+    logger.append_sink(view, "%v");
+    logger.info({}, "hello {}", 42);
+
+    ASSERT_TRUE(view.wait_for(1, std::chrono::milliseconds(1000)));
+
+    auto lines = view.snapshot();
+    ASSERT_EQ(lines.size(), 1u);
+    EXPECT_EQ(lines[0], "hello 42\n");
+}
+
+TEST(AsyncLoggerTest, FiltersBelowThresholdBeforeEnqueue) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+    logger.append_sink(view, "%v");
+    logger.set_level(ylog::Level::Warning);
+    logger.info({}, "dropped");
+    logger.warning({}, "kept");
+
+    // 单工作线程按 FIFO 投递：看到 kept 时，若 dropped 曾入队必然已在其中。
+    ASSERT_TRUE(view.wait_for(1, std::chrono::milliseconds(1000)));
+
+    auto lines = view.snapshot();
+    ASSERT_EQ(lines.size(), 1u);
+    EXPECT_EQ(lines[0], "kept\n");
+}
+
+TEST(AsyncLoggerTest, ReturnsWithoutWaitingForSink) {
+    struct Gate {
+        std::counting_semaphore<2> entered{0};
+        std::counting_semaphore<2> release{0};
+    };
+    struct BlockingSink {
+        Gate* gate = nullptr;
+
+        auto write(std::string_view) -> void {
+            gate->entered.release();
+            gate->release.acquire();
+        }
+        auto flush() -> void {}
+    };
+
+    Gate gate;
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+    logger.append_sink(BlockingSink{&gate}, "%v");
+
+    std::binary_semaphore returned{0};
+    auto producer = std::jthread([&logger, &returned] {
+        logger.log({}, ylog::Level::Info, "blocked");
+        returned.release();
+    });
+
+    bool logged_without_waiting = returned.try_acquire_for(std::chrono::milliseconds(500));
+    gate.release.release();
+
+    EXPECT_TRUE(logged_without_waiting) << "log() 等到了 sink 写完，说明投递仍在调用线程上";
+}
+
+TEST(AsyncLoggerTest, ConcurrentProducersDeliverEveryLineIntact) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+    logger.append_sink(view, "%v");
+
+    constexpr int thread_count = 4;
+    constexpr int per_thread = 200;
+    auto produce = [&logger](int tid) {
+        for (int i = 0; i < per_thread; ++i) {
+            logger.info({}, "{}-{:04d}-{}", tid, i, std::string(40, 'x'));
+        }
+    };
+
+    auto pool = std::vector<std::jthread>{};
+    for (int tid = 0; tid < thread_count; ++tid) {
+        pool.emplace_back(produce, tid);
+    }
+    for (auto& worker : pool) {
+        worker.join();
+    }
+
+    ASSERT_TRUE(view.wait_for(thread_count * per_thread, std::chrono::milliseconds(2000)));
+
+    auto lines = view.snapshot();
+    ASSERT_EQ(lines.size(), static_cast<std::size_t>(thread_count) * per_thread);
+
+    auto seen = std::set<std::pair<int, int>>{};
+    for (const auto& line : lines) {
+        ASSERT_EQ(line.size(), 48u) << "clobbered line: " << line;
+        auto tid = line[0] - '0';
+        auto sequence = std::stoi(line.substr(2, 4));
+        ASSERT_EQ(line.substr(7), std::string(40, 'x') + "\n");
+        EXPECT_TRUE(seen.emplace(tid, sequence).second) << "duplicate line " << line;
+    }
+    EXPECT_EQ(seen.size(), static_cast<std::size_t>(thread_count) * per_thread);
+}
+
+TEST(AsyncLoggerTest, DrainsQueueInOrderOnDestruction) {
+    constexpr int message_count = 200;
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    {
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+        logger.append_sink(AsyncRecordingSink{state}, "%v");
+        for (int i = 0; i < message_count; ++i) {
+            logger.info({}, "line-{}", i);
+        }
+    }
+
+    auto view = AsyncRecordingSink{state};
+    auto lines = view.snapshot();
+    ASSERT_EQ(lines.size(), static_cast<std::size_t>(message_count));
+    for (int i = 0; i < message_count; ++i) {
+        ASSERT_EQ(lines[static_cast<std::size_t>(i)], std::format("line-{}\n", i));
+    }
+}
+
+TEST(AsyncLoggerTest, BlocksProducerWhenQueueIsFull) {
+    struct Gate {
+        std::counting_semaphore<8> entered{0};
+        std::counting_semaphore<8> release{0};
+    };
+    struct BlockingSink {
+        Gate* gate = nullptr;
+
+        auto write(std::string_view) -> void {
+            gate->entered.release();
+            gate->release.acquire();
+        }
+        auto flush() -> void {}
+    };
+
+    Gate gate;
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 1});
+    logger.append_sink(BlockingSink{&gate}, "%v");
+
+    logger.info({}, "first");
+    ASSERT_TRUE(gate.entered.try_acquire_for(std::chrono::milliseconds(1000)));
+    logger.info({}, "second");  // 占满容量为 1 的队列
+
+    std::binary_semaphore third_returned{0};
+    auto producer = std::jthread([&logger, &third_returned] {
+        logger.info({}, "third");
+        third_returned.release();
+    });
+
+    EXPECT_FALSE(third_returned.try_acquire_for(std::chrono::milliseconds(100)))
+        << "队列已满时生产者没有等待";
+
+    gate.release.release();
+    EXPECT_TRUE(third_returned.try_acquire_for(std::chrono::milliseconds(1000)))
+        << "工作线程空出槽位后生产者没有被唤醒";
+
+    gate.release.release();
+    gate.release.release();
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

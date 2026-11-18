@@ -9,4 +9,5 @@ export import :sink.file;
 export import :sink.file.rotating;
 export import :sink.file.daily;
 export import :logger;
+export import :async;
 export import :registry;
