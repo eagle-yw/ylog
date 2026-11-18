@@ -33,4 +33,4 @@ private:
     std::ofstream stream_;
 };
 
-} // namespace ylog
+}  // namespace ylog

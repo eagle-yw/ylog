@@ -59,4 +59,4 @@ export auto utc_offset_minutes(const std::tm& time) -> int {
 #endif
 }
 
-} // namespace ylog_detail_os
+}  // namespace ylog_detail_os

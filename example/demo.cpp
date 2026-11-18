@@ -22,9 +22,9 @@ int main() {
 
     // 结构化日志：reflected() 反射自动展开 Point 的所有字段
     auto point = Point{10, 20.1};
-    logger.info({}, "{}", ylog::reflected(point));             // 直接打印
-    logger.info({}, "point = {}", ylog::reflected(point));     // 嵌入任意格式串
-    ylog::debug({}, "point = {}", ylog::reflected(point));      
+    logger.info({}, "{}", ylog::reflected(point));          // 直接打印
+    logger.info({}, "point = {}", ylog::reflected(point));  // 嵌入任意格式串
+    ylog::debug({}, "point = {}", ylog::reflected(point));
 
     // 简化：reflected() 让任意结构体直接用于 std::format / println
     // 无需手写 constexpr 格式串和 splice

@@ -20,7 +20,9 @@ export struct SourceLocation {
 
     // 显式指定位置：用于构造“无来源”的位置（line 为 0）或测试。
     SourceLocation(std::string_view file, std::uint32_t line, std::string_view function)
-        : file(file), line(line), function(function) {}
+        : file(file),
+          line(line),
+          function(function) {}
 
     // 与 spdlog 的 source_loc::empty() 同义：无行号即视为无来源。
     auto empty() const -> bool { return line == 0 || file.empty(); }
@@ -32,8 +34,8 @@ namespace detail {
 
 consteval auto make_field_format(std::meta::info type_info) -> std::meta::info {
     std::string result;
-    auto members = std::meta::nonstatic_data_members_of(
-        type_info, std::meta::access_context::unchecked());
+    auto members =
+        std::meta::nonstatic_data_members_of(type_info, std::meta::access_context::unchecked());
     bool first = true;
     for (std::meta::info member : members) {
         if (!first) {
@@ -58,7 +60,8 @@ consteval auto member_count() -> std::size_t {
 // 第 N 个字段的反射信息（供 splice 使用）。
 template <typename T, std::size_t N>
 consteval auto nth_member() -> std::meta::info {
-    auto members = std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked());
+    auto members =
+        std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked());
     return members[N];
 }
 
@@ -69,7 +72,7 @@ auto to_tuple_impl(const T& object) {
     }(std::make_index_sequence<member_count<T>()>{});
 }
 
-} // namespace detail
+}  // namespace detail
 
 // 供用户调用的编译期格式串生成器；反射信息留在 detail 内部。
 export template <typename T>
@@ -127,7 +130,7 @@ private:
     std::size_t thread_id_;
 };
 
-} // namespace ylog
+}  // namespace ylog
 
 // std::formatter 特化：让 Reflected<T> 可直接用于 std::format / println。
 template <typename T>

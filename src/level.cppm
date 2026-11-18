@@ -5,15 +5,7 @@ import std;
 namespace ylog {
 
 // 日志级别。数值越小越严重，与过滤方向一致。
-export enum class Level : int {
-    Trace = 0,
-    Debug,
-    Info,
-    Warning,
-    Error,
-    Critical,
-    Off
-};
+export enum class Level : int { Trace = 0, Debug, Info, Warning, Error, Critical, Off };
 
 export constexpr std::size_t level_count = 7;
 
@@ -23,7 +15,7 @@ namespace detail {
 inline constexpr std::array<std::string_view, level_count> level_names{
     "Trace", "Debug", "Info", "Warning", "Error", "Critical", "Off"};
 
-} // namespace detail
+}  // namespace detail
 
 export constexpr auto level_name(Level value) -> std::string_view {
     auto index = static_cast<std::size_t>(value);
@@ -39,4 +31,4 @@ export constexpr auto level_from_string(std::string_view text) -> Level {
     return Level::Info;
 }
 
-} // namespace ylog
+}  // namespace ylog

@@ -12,9 +12,7 @@ public:
         std::cout.write(line.data(), static_cast<std::streamsize>(line.size()));
     }
 
-    auto flush() -> void {
-        std::cout.flush();
-    }
+    auto flush() -> void { std::cout.flush(); }
 };
 
-} // namespace ylog
+}  // namespace ylog
