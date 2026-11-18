@@ -1745,6 +1745,91 @@ TEST(AsyncLoggerTest, DefaultHandlerIsRateLimited) {
     EXPECT_NE(text.find("同一秒内的重复上报"), std::string::npos);
 }
 
+TEST(RegistryAsyncTest, CreatesAndFindsAsyncLogger) {
+    auto& registry = ylog::Registry::instance();
+    auto& logger = registry.create_async("async-registry", ylog::AsyncLoggerConfig{});
+
+    EXPECT_EQ(logger.name(), "async-registry");
+    EXPECT_EQ(registry.get_async("async-registry"), &logger);
+    EXPECT_EQ(registry.get("async-registry"), nullptr);
+    EXPECT_EQ(registry.get_async("missing"), nullptr);
+    EXPECT_TRUE(registry.contains("async-registry"));
+
+    registry.drop_all();
+    EXPECT_FALSE(registry.contains("async-registry"));
+}
+
+TEST(RegistryAsyncTest, RejectsNameCollisionAcrossTypes) {
+    auto& registry = ylog::Registry::instance();
+    registry.create("collision-sync");
+
+    EXPECT_THROW(registry.create_async("collision-sync", ylog::AsyncLoggerConfig{}),
+                 std::invalid_argument);
+
+    registry.create_async("collision-async", ylog::AsyncLoggerConfig{});
+    EXPECT_THROW(registry.create("collision-async"), std::invalid_argument);
+
+    registry.drop_all();
+}
+
+TEST(RegistryAsyncTest, SetLevelByNameFiltersAsyncMessages) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto& registry = ylog::Registry::instance();
+    auto& logger = registry.create_async("async-level", ylog::AsyncLoggerConfig{});
+    logger.append_sink(view, "%v");
+
+    EXPECT_TRUE(registry.set_level("async-level", ylog::Level::Warning));
+    EXPECT_FALSE(registry.set_level("missing", ylog::Level::Warning));
+    EXPECT_EQ(logger.level(), ylog::Level::Warning);
+
+    logger.info({}, "dropped");
+    logger.warning({}, "kept");
+
+    ASSERT_TRUE(view.wait_for(1, std::chrono::milliseconds(1000)));
+
+    auto lines = view.snapshot();
+    ASSERT_EQ(lines.size(), 1u);
+    EXPECT_EQ(lines[0], "kept\n");
+
+    registry.drop_all();
+}
+
+TEST(RegistryAsyncTest, FlushAllIsBarrierForAsyncLoggers) {
+    auto directory = temp_test_path("registry-async-flush");
+    std::filesystem::create_directories(directory);
+    auto path = directory / "flush.log";
+
+    auto& registry = ylog::Registry::instance();
+    auto& logger = registry.create_async("async-flush-all", ylog::AsyncLoggerConfig{});
+    logger.append_sink(ylog::FileSink(path.string()), "%v");
+    logger.info({}, "persisted");
+
+    registry.flush_all();
+    EXPECT_EQ(read_all(path), "persisted\n");
+
+    registry.drop_all();
+    std::filesystem::remove_all(directory);
+}
+
+TEST(RegistryAsyncTest, DropDrainsWithoutExplicitStop) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto& registry = ylog::Registry::instance();
+    auto& logger = registry.create_async("async-drop", ylog::AsyncLoggerConfig{});
+    logger.append_sink(view, "%v");
+    for (int i = 0; i < 100; ++i) {
+        logger.info({}, "line-{}", i);
+    }
+
+    EXPECT_TRUE(registry.drop("async-drop"));
+    EXPECT_FALSE(registry.contains("async-drop"));
+
+    EXPECT_EQ(view.snapshot().size(), 100u) << "drop() 时没有排空已入队的消息";
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
