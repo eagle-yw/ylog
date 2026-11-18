@@ -14,6 +14,14 @@
 
 停止后的 `flush()` 仍由调用线程执行 sink flush：单 sink 的串行由 `AnySink::output_mutex_` 提供，但「sink 只被 worker 访问」这条隐性前提在停止后不再成立。若将来出现依赖线程约束的 sink（例如按线程缓存状态的实现），这条路径需要重新引入串行化。
 
+## 追加：ErrorHandler 的触发面与上报粒度
+
+spec 只承认三类触发点：① 非阻塞策略的每次丢弃/覆盖；② 停止后仍尝试入队；③ 某个 sink 投递失败。三处边界按下面口径解释。
+
+- **③ 包含 flush 失败。** 「投递失败」按结果定义：没写进 sink、或写进了但没落盘，都是没送出去。`flush_sinks()` 的失败因此归入 ③，不新增第四类。
+- **② 每次都报，不做「只报一次」去重。** User Story 8 是「every drop/overrun reported, so that loss is never silent」；早先的 `report_stopped_once` 让停止后的第二条起彻底静默。输出量交给默认 handler 的每秒限频控制，而不是在组件里静默丢弃通知。
+- **③ 的「每 sink 一次」按「连续失败」实现。** 一个 sink 处在失败状态时只上报一次，它下一次写成功即复位，再次失败会重新上报。作用域是组件生命周期内的一段失败区间，不是整个进程；这样持续故障不会按消息条数刷屏，恢复后复发仍然可见。flush 失败不参与这次去重——它只由显式 flush 触发，频率由调用方控制。
+
 ## Considered Options
 
 - 实现 `Sink` concept 的队列装饰器：改动最小，但 `AnySink` 在调用线程已完成格式化，Message 元数据在到达异步层前被消费，下游无法按级别或源位置决策。
