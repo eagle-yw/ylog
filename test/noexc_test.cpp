@@ -60,7 +60,8 @@ auto reports_hot_path_failure() -> void {
     check(!reported.empty(), "hot path failure reaches err_handler");
 }
 
-// 无异常构建下配置失败是 println + terminate，无法在进程内自检，
+// 无异常构建下配置失败是 assert + println + terminate：断言只表达前置条件，
+// NDEBUG 下会被编译掉，终止是无条件的。这条路径无法在进程内自检（一旦触发就没了），
 // 只能靠文件顶部的 static_assert 确认开关口径；此处不构造非法配置。
 
 // 只解析非负整数：行格式由本文件的生产者决定，不用 std::stoi（它靠异常报错）。
