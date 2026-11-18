@@ -121,9 +121,9 @@ struct OverflowReports {
         auto discarded_count = discarded;
         auto other_count = other;
         return [overrun_count, discarded_count, other_count](std::string_view message) {
-            if (message.find("overrun_oldest") != std::string_view::npos) {
+            if (message.find("OverrunOldest") != std::string_view::npos) {
                 overrun_count->fetch_add(1, std::memory_order_relaxed);
-            } else if (message.find("discard_new") != std::string_view::npos) {
+            } else if (message.find("DiscardNew") != std::string_view::npos) {
                 discarded_count->fetch_add(1, std::memory_order_relaxed);
             } else {
                 other_count->fetch_add(1, std::memory_order_relaxed);

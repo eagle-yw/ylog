@@ -84,12 +84,16 @@ inline auto guard_sink_call(Action&& action, OnFailure&& on_failure) -> void {
 
 }  // namespace detail
 
+// 默认 handler 的公开工厂：`AsyncLoggerConfig` 的默认值出现在导出类型的声明面上，
+// 那里不能写 detail 限定名，所以把构造收进这个公开函数。
+export auto default_error_handler() -> ErrorHandler { return detail::DefaultErrorHandler{}; }
+
 export struct AsyncLoggerConfig {
     std::string name;
     Level level = Level::Info;
     std::size_t queue_capacity = 8192;
     OverflowPolicy overflow_policy = OverflowPolicy::Block;
-    ErrorHandler err_handler = detail::DefaultErrorHandler{};
+    ErrorHandler err_handler = default_error_handler();
 };
 
 // 异步日志组件：调用线程只做级别检查、Message 构造与入队，
@@ -241,10 +245,10 @@ public:
             cv_ready_.notify_one();
         }
         if (!overrun.empty()) {
-            report(std::format("溢出：覆盖最旧消息 {}（策略 overrun_oldest）", overrun));
+            report(std::format("溢出：覆盖最旧消息 {}（策略 OverrunOldest）", overrun));
         }
         if (discarded) {
-            report(std::format("溢出：丢弃新消息 {}（策略 discard_new）", message.formatted()));
+            report(std::format("溢出：丢弃新消息 {}（策略 DiscardNew）", message.formatted()));
         }
         if (rejected_after_stop) {
             // 每次拒绝都上报：spec 的通知面只有 err_handler，靠默认 handler 的限频
