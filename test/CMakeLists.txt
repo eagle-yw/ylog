@@ -1,3 +1,14 @@
+# 无异常构建只跑自检程序：gtest 的 GTEST_HAS_EXCEPTIONS 与本工程的 -fno-exceptions
+# 口径不一致，且 unit_test 里有多处 EXPECT_THROW 断言配置期抛异常。
+if(YLOG_NO_EXCEPTIONS)
+    add_executable(noexc_test noexc_test.cpp)
+
+    target_link_libraries(noexc_test PRIVATE ylog)
+
+    add_test(NAME noexc COMMAND noexc_test)
+    return()
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(
@@ -47,8 +58,8 @@ target_include_directories(pattern_oracle_test SYSTEM PRIVATE
 
 add_test(NAME pattern_oracle_test COMMAND pattern_oracle_test)
 
-# 无异常变体的独立 ctest target：用 gtest 会引入 GTEST_HAS_EXCEPTIONS 口径不一致，
-# 因此这里是一个自检程序（退出码即结果）。
+# 测试变体：主库开启异常时，用同一个自检程序覆盖无异常库。
+# 不用 gtest：GTEST_HAS_EXCEPTIONS 的口径须与整库一致，混用会引入 ODR 风险。
 if(TARGET ylog_noexc)
     add_executable(noexc_test noexc_test.cpp)
 

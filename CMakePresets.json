@@ -15,6 +15,20 @@
             }
         },
         {
+            "name": "gcc16-noexc",
+            "displayName": "GCC 16.2.1 x86_64-pc-linux-gnu (无异常)",
+            "description": "以 YLOG_NO_EXCEPTIONS=ON 构建，只运行 noexc 自检",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_INSTALL_PREFIX": "${sourceDir}/out/install/${presetName}",
+                "CMAKE_C_COMPILER": "/usr/sbin/gcc",
+                "CMAKE_CXX_COMPILER": "/usr/sbin/g++",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "YLOG_NO_EXCEPTIONS": "ON"
+            }
+        },
+        {
             "name": "clang",
             "displayName": "Clang 23.1.5 (供 clangd 使用)",
             "description": "生成 clangd 所需的编译数据库与模块 BMI；clangd 版本须与 clang 一致",

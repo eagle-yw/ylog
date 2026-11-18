@@ -22,9 +22,22 @@ target_sources(ylog
     ${YLOG_MODULE_SOURCES}
 )
 
-# 无异常变体：exceptions_enabled 在模块编译期定型，因此必须整份源码重新编译，
-# 只在消费端加 -fno-exceptions 不会生效。
-if(YLOG_BUILD_NOEXC_TESTS)
+# exceptions_enabled 在模块编译期定型，因此开关必须作用在库本身，而不是消费端。
+# 宏随接口传播，保证消费端看到的口径与 BMI 一致。
+function(ylog_enable_no_exceptions target)
+    target_compile_definitions(${target} PUBLIC YLOG_NO_EXCEPTIONS)
+    target_compile_options(${target} PUBLIC
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-fno-exceptions>
+        $<$<CXX_COMPILER_ID:MSVC>:/EHs-c->
+    )
+endfunction()
+
+if(YLOG_NO_EXCEPTIONS)
+    ylog_enable_no_exceptions(ylog)
+endif()
+
+# 测试变体：只在本仓库的异常开启构建里出现，供单次 ctest 双覆盖。
+if(YLOG_BUILD_NOEXC_TESTS AND NOT YLOG_NO_EXCEPTIONS)
     add_library(ylog_noexc)
 
     target_sources(ylog_noexc
@@ -32,6 +45,5 @@ if(YLOG_BUILD_NOEXC_TESTS)
         ${YLOG_MODULE_SOURCES}
     )
 
-    target_compile_definitions(ylog_noexc PUBLIC YLOG_NO_EXCEPTIONS)
-    target_compile_options(ylog_noexc PUBLIC -fno-exceptions)
+    ylog_enable_no_exceptions(ylog_noexc)
 endif()
