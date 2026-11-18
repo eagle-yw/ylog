@@ -98,6 +98,47 @@ auto universal_sinks_behave() -> void {
     check(reports->load(std::memory_order_relaxed) == 1, "ostream sink reports a failure once");
 }
 
+// 公共面在无异常构建下同样可用：should_log 守门、sinks() 视图、set_formatter 扇出、
+// flush_on 的计数。
+auto logger_public_surface_behaves() -> void {
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view line) -> void { *out += line; }
+    };
+
+    struct CountingFlushSink {
+        std::shared_ptr<std::atomic<int>> flushes;
+        auto write(std::string_view) -> void {}
+        auto flush() -> void { flushes->fetch_add(1, std::memory_order_relaxed); }
+    };
+
+    auto first = std::string{};
+    auto second = std::string{};
+    auto flushes = std::make_shared<std::atomic<int>>(0);
+
+    auto logger = ylog::Logger("noexc-surface");
+    logger.set_level(ylog::Level::Info);
+    check(!logger.should_log(ylog::Level::Debug), "should_log rejects below the level");
+    check(logger.should_log(ylog::Level::Info), "should_log accepts at the level");
+
+    logger.append_sink(Capture{&first});
+    logger.append_sink(Capture{&second});
+    logger.append_sink(CountingFlushSink{flushes});
+    check(logger.sinks().size() == 4, "sinks() sees the default sink plus the appended ones");
+
+    logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
+    logger.info({}, "hello");
+    check(first == "Info|hello\n" && second == "Info|hello\n",
+          "set_formatter fans out to every sink");
+
+    logger.flush_on(ylog::Level::Error);
+    logger.warning({}, "below the threshold");
+    check(flushes->load(std::memory_order_relaxed) == 0,
+          "flush_on does not flush below the threshold");
+    logger.error({}, "at the threshold");
+    check(flushes->load(std::memory_order_relaxed) == 1, "flush_on flushes at the threshold");
+}
+
 // 无异常构建下配置失败是 assert + println + terminate：断言只表达前置条件，
 // NDEBUG 下会被编译掉，终止是无条件的。这条路径无法在进程内自检（一旦触发就没了），
 // 只能靠文件顶部的 static_assert 确认开关口径；此处不构造非法配置。
@@ -342,6 +383,7 @@ auto main() -> int {
 
     reports_hot_path_failure();
     universal_sinks_behave();
+    logger_public_surface_behaves();
 
     if (failures != 0) {
         std::println(std::cerr, "{} check(s) failed", failures);

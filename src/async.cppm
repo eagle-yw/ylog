@@ -268,8 +268,14 @@ private:
     // 入队成功只在这一个地方记录，避免调用点各写一次布尔量。
     // 调用方持有 mutex_：这里也是配置期结束的唯一起点（worker 从此可能遍历 sink）。
     auto enqueue(Message message, EnqueueOutcome& outcome) -> void {
+        auto reached_flush_level = message.level() >= flush_level();
         queue_.push_back(QueuedMessage{std::move(message), next_sequence_++});
         outcome.enqueued = true;
+        if (reached_flush_level) {
+            // flush_on 折算成一次序号屏障请求：生产者不等落盘，也不占队列槽位，
+            // 与 flush() 走同一套机制，因此不会改变它的屏障语义。
+            flush_target_ = std::max(flush_target_, next_sequence_);
+        }
         seal_configuration();
         // 不变量：队列里只有消息，长度受容量约束，flush 不占用队列空间。
         assert(queue_.size() <= queue_capacity_);
@@ -291,7 +297,7 @@ private:
     // 扇出交给 SinkSet：它负责守卫、跳过失败 sink、以及「连续失败只报一次」。
     // 无异常构建下 sink 不会抛，守卫退化为直接调用，失败由 sink 自己的 handler 上报。
     auto write_to_sinks(const Message& message) -> void {
-        sinks().write(message, [this](std::string_view why) {
+        sink_set().write(message, [this](std::string_view why) {
             report(std::format("sink 写入失败：{}", why));
         });
     }
@@ -299,7 +305,7 @@ private:
     // flush 失败算第三类触发点「某个 sink 投递失败」：数据没落盘同样是没送出去。
     // 这条路径每次都上报——只有显式 flush 才走到这儿，频率由调用方控制。
     auto flush_sinks() -> void {
-        sinks().flush(
+        sink_set().flush(
             [this](std::string_view why) { report(std::format("sink flush 失败：{}", why)); });
     }
 
@@ -310,6 +316,17 @@ private:
             cv_ready_.wait(lock, token,
                            [this] { return !queue_.empty() || flush_target_ > flushed_sequence_; });
 
+            // flush 请求按序号结算，而不是绑在「队列排空」上：目标之内的消息都写出后
+            // 立刻落盘，flush_on 因此能在那一条之后落盘，flush() 也能更早返回。
+            if (flush_target_ > flushed_sequence_ && processed_sequence_ >= flush_target_) {
+                auto target = flush_target_;
+                lock.unlock();
+                flush_sinks();
+                lock.lock();
+                flushed_sequence_ = std::max(flushed_sequence_, target);
+                cv_flushed_.notify_all();
+                continue;
+            }
             if (!queue_.empty()) {
                 auto item = std::move(queue_.front());
                 queue_.pop_front();
@@ -320,19 +337,9 @@ private:
                 processed_sequence_ = item.sequence + 1;
                 continue;
             }
-            if (flush_target_ > flushed_sequence_) {
-                // 队列空时 processed_sequence_ 一定追平 next_sequence_：覆盖策略只删队首，
-                // 最新入队的一条总会落地；所以这里不该出现「目标还没写出」的状态。
-                assert(processed_sequence_ >= flush_target_);
-                // 目标之内的消息都写完了：落盘一次，然后把这之前的序号标记为已 flush。
-                auto target = flush_target_;
-                lock.unlock();
-                flush_sinks();
-                lock.lock();
-                flushed_sequence_ = std::max(flushed_sequence_, target);
-                cv_flushed_.notify_all();
-                continue;
-            }
+            // 走到这里只可能是「还有没写到的目标」或「已收到停止请求」；前者意味着
+            // 目标对应的消息还在队列里，后者意味着没人会再推进 processed_sequence_。
+            assert(flush_target_ <= flushed_sequence_ || token.stop_requested());
             if (token.stop_requested()) {
                 worker_finished_ = true;
                 lock.unlock();

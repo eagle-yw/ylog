@@ -174,32 +174,44 @@ inline auto guard_sink_call(Action&& action, OnFailure&& on_failure) -> void {
 //
 // 两级锁与 formatter 归属都在 AnySink 里（见 ADR-0004），这里只负责「按顺序对每个
 // sink 做一次动作」。同步路径让异常照常外传；异步路径用带回调的重载把失败收敛成上报。
+//
+// 存储是两个等长向量：sinks_ 必须是 AnySink 的连续数组（sinks() 把它直接交出去），
+// 所以失败状态不能和它挤在同一个元素里。两者只在 push() 里同时增长。
 class SinkSet {
 public:
     // 追加 sink，可为其单独指定 pattern（formatter 归属 sink）。
     template <Sink T>
     auto append(T&& sink, std::string_view pattern) -> void {
-        slots_.push_back(
-            Slot{AnySink(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern))});
+        push(AnySink(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern)));
     }
 
     // 追加 sink 并注入配置好的 formatter（可带自定义 flag）。
     template <Sink T>
     auto append(T&& sink, std::unique_ptr<Formatter> formatter) -> void {
-        slots_.push_back(Slot{AnySink(std::forward<T>(sink), std::move(formatter))});
+        push(AnySink(std::forward<T>(sink), std::move(formatter)));
     }
+
+    // 结构不可变、元素可配置。之后的 append 会让底层数组重新分配，视图随即失效。
+    auto sinks() -> std::span<AnySink> { return sinks_; }
 
     // 为所有 sink 设置 pattern（扇出）。
     auto set_pattern(std::string_view pattern) -> void {
-        for (auto& slot : slots_) {
-            slot.sink.set_pattern(pattern);
+        for (auto& sink : sinks_) {
+            sink.set_pattern(pattern);
+        }
+    }
+
+    // formatter 归属 sink：每个 sink 拿独立 clone，改一个不影响另一个。
+    auto set_formatter(const Formatter& prototype) -> void {
+        for (auto& sink : sinks_) {
+            sink.set_formatter(prototype.clone());
         }
     }
 
     // 同步路径：异常照常向外传播，行为与内联循环一致。
     auto write(const Message& message) -> void {
-        for (auto& slot : slots_) {
-            slot.sink.write(message);
+        for (auto& sink : sinks_) {
+            sink.write(message);
         }
     }
 
@@ -207,44 +219,45 @@ public:
     // 连续失败只上报一次，该 sink 下一次写成功即复位。
     template <typename OnFailure>
     auto write(const Message& message, OnFailure&& on_failure) -> void {
-        for (auto& slot : slots_) {
+        for (auto index = std::size_t{0}; index < sinks_.size(); ++index) {
             auto failure = std::string{};
-            guard_sink_call([&slot, &message] { slot.sink.write(message); },
+            guard_sink_call([this, index, &message] { sinks_[index].write(message); },
                             [&failure](std::string_view why) { failure = std::string(why); });
             if (failure.empty()) {
-                slot.failing = false;
+                failing_[index] = false;
                 continue;
             }
-            if (slot.failing) {
+            if (failing_[index]) {
                 continue;
             }
-            slot.failing = true;
+            failing_[index] = true;
             std::invoke(on_failure, std::string_view(failure));
         }
     }
 
     auto flush() -> void {
-        for (auto& slot : slots_) {
-            slot.sink.flush();
+        for (auto& sink : sinks_) {
+            sink.flush();
         }
     }
 
     // flush 失败每次都回调：只有显式 flush 才走到这里，频率由调用方控制。
     template <typename OnFailure>
     auto flush(OnFailure&& on_failure) -> void {
-        for (auto& slot : slots_) {
-            guard_sink_call([&slot] { slot.sink.flush(); }, on_failure);
+        for (auto& sink : sinks_) {
+            guard_sink_call([&sink] { sink.flush(); }, on_failure);
         }
     }
 
 private:
-    // sink 与它的失败状态放在一起：连续失败只在进入失败状态时上报一次。
-    struct Slot {
-        AnySink sink;
-        bool failing{false};
-    };
+    // sink 与它的失败状态必须同时增长，因此只留这一个入口。
+    auto push(AnySink sink) -> void {
+        sinks_.push_back(std::move(sink));
+        failing_.push_back(false);
+    }
 
-    std::vector<Slot> slots_;
+    std::vector<AnySink> sinks_;
+    std::vector<bool> failing_;  // 与 sinks_ 等长：连续失败只在进入失败状态时上报一次
 };
 
 }  // namespace detail

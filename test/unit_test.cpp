@@ -93,6 +93,38 @@ struct FailingStreambuf : std::streambuf {
     auto overflow(int_type) -> int_type override { return traits_type::eof(); }
 };
 
+// 只数 flush 次数的 sink：flush_on 的验收要回答「是谁触发了 flush」。
+struct FlushCountingSink {
+    std::atomic<int>* flushes;
+    auto write(std::string_view) -> void {}
+    auto flush() -> void { flushes->fetch_add(1, std::memory_order_relaxed); }
+};
+
+// flush 卡在闸门上的 sink：worker 停在 flush 里时，生产者必须已经返回。
+struct GatedFlushSink {
+    std::atomic<bool>* entered;
+    std::counting_semaphore<1>* release;
+
+    auto write(std::string_view) -> void {}
+    auto flush() -> void {
+        *entered = true;
+        release->acquire();
+    }
+};
+
+// 轮询等待，避免用固定 sleep 猜 worker 的进度。
+auto wait_until(const std::function<bool()>& predicate,
+                std::chrono::milliseconds timeout = std::chrono::milliseconds(2000)) -> bool {
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return predicate();
+}
+
 }  // namespace
 
 struct Point {
@@ -188,6 +220,109 @@ TEST(LoggerTest, AppendSink) {
     logger.debug({}, "append sink test {}", 42);
 
     EXPECT_TRUE(output.ends_with("append sink test 42\n"));
+}
+
+TEST(LoggerTest, ShouldLogFollowsLevel) {
+    auto logger = ylog::Logger("should-log");
+
+    EXPECT_EQ(logger.level(), ylog::Level::Info);
+    EXPECT_FALSE(logger.should_log(ylog::Level::Debug));
+    EXPECT_TRUE(logger.should_log(ylog::Level::Info));
+    EXPECT_TRUE(logger.should_log(ylog::Level::Critical));
+
+    logger.set_level(ylog::Level::Debug);
+    EXPECT_FALSE(logger.should_log(ylog::Level::Trace));
+    EXPECT_TRUE(logger.should_log(ylog::Level::Debug));
+
+    logger.set_level(ylog::Level::Off);
+    EXPECT_FALSE(logger.should_log(ylog::Level::Critical));
+}
+
+TEST(LoggerTest, SinksExposeEveryAppendedSink) {
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view line) -> void { out->append(line); }
+    };
+
+    auto first = std::string{};
+    auto second = std::string{};
+    auto logger = ylog::Logger("sinks");
+    logger.set_level(ylog::Level::Info);
+
+    // Logger 构造时已经装好一个默认 StdoutSink。
+    auto initial = logger.sinks().size();
+    EXPECT_EQ(initial, 1);
+
+    logger.append_sink(Capture{&first}, "%v");
+    logger.append_sink(Capture{&second}, "%v");
+    EXPECT_EQ(logger.sinks().size(), initial + 2);
+
+    // 元素可配置：单个 sink 的 pattern 只影响自己。
+    logger.sinks()[initial].set_pattern("%l: %v");
+    logger.sinks()[initial + 1].set_pattern("[%v]");
+
+    logger.info({}, "hello");
+    logger.flush();
+
+    EXPECT_EQ(first, "Info: hello\n");
+    EXPECT_EQ(second, "[hello]\n");
+}
+
+TEST(LoggerTest, SetFormatterFansOutToEverySink) {
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view line) -> void { out->append(line); }
+    };
+
+    auto first = std::string{};
+    auto second = std::string{};
+    auto logger = ylog::Logger("set-formatter");
+    logger.set_level(ylog::Level::Info);
+    logger.append_sink(Capture{&first});
+    logger.append_sink(Capture{&second});
+    auto first_index = logger.sinks().size() - 2;
+
+    logger.set_formatter(std::make_unique<ylog::PatternFormatter>("%l|%v"));
+    logger.info({}, "hello");
+    EXPECT_EQ(first, "Info|hello\n");
+    EXPECT_EQ(second, "Info|hello\n");
+
+    // formatter 归属 sink：扇出的是各自的 clone，改一个不影响另一个。
+    logger.sinks()[first_index].set_pattern("%v");
+    logger.info({}, "again");
+    EXPECT_EQ(first, "Info|hello\nagain\n");
+    EXPECT_EQ(second, "Info|hello\nInfo|again\n");
+}
+
+TEST(LoggerTest, SetFormatterRejectsEmptyFormatter) {
+    auto logger = ylog::Logger("empty-formatter");
+
+    EXPECT_THROW(logger.set_formatter(nullptr), std::invalid_argument);
+}
+
+TEST(LoggerTest, FlushOnTriggersOnlyForConfiguredLevels) {
+    auto flushes = std::atomic<int>{0};
+    auto logger = ylog::Logger("flush-on");
+    logger.set_level(ylog::Level::Trace);
+    logger.append_sink(FlushCountingSink{&flushes});
+
+    // 默认 Off：日志路径一次都不 flush。
+    EXPECT_EQ(logger.flush_level(), ylog::Level::Off);
+    logger.info({}, "default is off");
+    logger.critical({}, "default is off");
+    EXPECT_EQ(flushes.load(), 0);
+
+    logger.flush_on(ylog::Level::Warning);
+    EXPECT_EQ(logger.flush_level(), ylog::Level::Warning);
+
+    logger.info({}, "below the threshold");
+    EXPECT_EQ(flushes.load(), 0);
+
+    logger.warning({}, "at the threshold");
+    EXPECT_EQ(flushes.load(), 1);
+
+    logger.error({}, "above the threshold");
+    EXPECT_EQ(flushes.load(), 2);
 }
 
 TEST(FormatterTest, PatternFlagConcept) {
@@ -1590,6 +1725,73 @@ TEST(AsyncLoggerTest, ExposesNameAndLevel) {
     logger.set_level(ylog::Level::Warning);
 
     EXPECT_EQ(logger.level(), ylog::Level::Warning);
+}
+
+TEST(AsyncLoggerTest, ShouldLogFollowsLevel) {
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-should-log"});
+
+    EXPECT_FALSE(logger.should_log(ylog::Level::Debug));
+    EXPECT_TRUE(logger.should_log(ylog::Level::Info));
+
+    logger.set_level(ylog::Level::Trace);
+    EXPECT_TRUE(logger.should_log(ylog::Level::Trace));
+    EXPECT_TRUE(logger.should_log(ylog::Level::Critical));
+}
+
+TEST(AsyncLoggerTest, SinksExposeEveryAppendedSink) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-sinks"});
+
+    auto initial = logger.sinks().size();
+    EXPECT_EQ(initial, 1);
+
+    logger.append_sink(view, "%v");
+    EXPECT_EQ(logger.sinks().size(), initial + 1);
+    EXPECT_EQ(logger.sinks()[initial].pattern(), "%v");
+}
+
+TEST(AsyncLoggerTest, FlushOnFlushesWithoutAnExplicitFlush) {
+    auto flushes = std::atomic<int>{0};
+    auto logger =
+        ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async-flush-on", .queue_capacity = 8});
+    logger.append_sink(FlushCountingSink{&flushes});
+    logger.flush_on(ylog::Level::Warning);
+
+    logger.info({}, "below the threshold");
+    EXPECT_EQ(flushes.load(), 0);
+
+    logger.warning({}, "at the threshold");
+    EXPECT_TRUE(wait_until([&flushes] { return flushes.load() > 0; }));
+}
+
+TEST(AsyncLoggerTest, FlushOnDoesNotBlockTheProducer) {
+    auto entered = std::atomic<bool>{false};
+    auto release = std::counting_semaphore<1>{0};
+    auto producer_done = std::atomic<bool>{false};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async-flush-on-blocking", .queue_capacity = 4});
+    logger.append_sink(GatedFlushSink{&entered, &release});
+    logger.flush_on(ylog::Level::Info);
+
+    // 队列装得下这三条，所以生产者只可能在「等 flush」上被挡住。
+    auto producer = std::thread([&logger, &producer_done] {
+        for (int index = 0; index < 3; ++index) {
+            logger.info({}, "line {}", index);
+        }
+        producer_done = true;
+    });
+
+    auto entered_in_time = wait_until([&entered] { return entered.load(); });
+    auto finished_while_flushing = producer_done.load();
+
+    release.release();
+    producer.join();
+    logger.stop();
+
+    EXPECT_TRUE(entered_in_time);
+    EXPECT_TRUE(finished_while_flushing);
 }
 
 TEST(AsyncLoggerTest, DeliversMessageToItsSink) {

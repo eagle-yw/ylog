@@ -14,7 +14,7 @@ public:
     explicit Logger(std::string name)
         : LoggerBase(std::move(name), Level::Info) {}
 
-    auto flush() -> void { sinks().flush(); }
+    auto flush() -> void { sink_set().flush(); }
 
     // 核心日志入口。SourceLocation 默认参数在调用点捕获位置。
     // Logger 只负责生成 Message，格式化由各 sink 自己的 formatter 完成。
@@ -28,7 +28,11 @@ public:
         }
         auto user_message = std::format(format, std::forward<Args>(args)...);
         auto message = Message(level, name(), location, user_message);
-        sinks().write(message);
+        sink_set().write(message);
+        // flush_on：同步路径在写出后立刻落盘；flush 失败照常向调用方抛出。
+        if (level >= flush_level()) {
+            flush();
+        }
     }
 };
 

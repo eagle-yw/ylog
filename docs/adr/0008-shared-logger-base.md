@@ -1,11 +1,12 @@
 # 共享日志基座放在实现分区
 
-`Logger` 与 `AsyncLogger` 的公共面（`name` / `level` / `set_level` / 两个 `append_sink` / `set_pattern` / `should_log`）连同存储完全一致，只有写入路径不同。把 `SinkSet` 与六个级别便捷方法抽走之后，剩下的成员仍在两个组件里逐行各写一份：冗余从「实现」缩小到「签名加存储」，但依旧要同步维护两处。
+`Logger` 与 `AsyncLogger` 的公共面（`name` / `level` / `set_level` / 两个 `append_sink` / `set_pattern` / `set_formatter` / `sinks` / `should_log` / `flush_on` + `flush_level`）连同存储完全一致，只有写入路径不同。把 `SinkSet` 与六个级别便捷方法抽走之后，剩下的成员仍在两个组件里逐行各写一份：冗余从「实现」缩小到「签名加存储」，但依旧要同步维护两处。
 
 ## 决策
 
-- `detail::LoggerBase<Derived>`（`src/logger_base.cppm`）持有 `name_` / `level_` / `sinks_`，提供上述成员、六个级别便捷方法与配置期检查，通过 CRTP 把 `trace..critical` 转回派生类的 `log()`。
+- `detail::LoggerBase<Derived>`（`src/logger_base.cppm`）持有 `name_` / `level_` / `flush_level_` / `sinks_`，提供上述成员、六个级别便捷方法与配置期检查，通过 CRTP 把 `trace..critical` 转回派生类的 `log()`。
 - `Logger` 与 `AsyncLogger` 公开继承它，各自只留差异：同步直写，或入队加工作线程与序号屏障。
+- `flush_on` 的阈值与 setter 在基座里，触发动作留给派生类：同步组件在写出后直接 `flush()`，异步组件把请求折算成一次序号屏障请求（见 ADR-0003）。阈值与 `level_` 同属运行期可改的原子配置，不参与 `ensure_configurable`。
 - 基座独占**实现分区** `ylog:logger.base`（`module ylog:logger.base;`，不写 `export`）。`ylog` 的主接口 unit 不导出它，`:async` 因此只 import 这个分区，不必为拿一个 CRTP 基类而 import `:logger`。
 
 ## 为什么不是组合
