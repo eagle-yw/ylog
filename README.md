@@ -99,6 +99,24 @@ ctest --test-dir out/build/gcc16-noexc --output-on-failure
 异常开启的构建默认还会编一份 `ylog_noexc` 并用同一个自检程序覆盖，
 单次 `ctest` 就能同时验证两种模式（`YLOG_BUILD_NOEXC_TESTS=OFF` 可关闭）。
 
+## 覆盖率
+
+插桩构建单独一棵树（`gcc16-cov`），只统计 `src/`：
+
+```sh
+cmake --preset gcc16-cov
+cmake --build --preset gcc16-cov
+ctest --test-dir out/build/gcc16-cov --output-on-failure
+gcovr --root . --filter 'src/' --print-summary out/build/gcc16-cov
+```
+
+`gcovr` 不在 Arch 基础包里：`pacman -S gcovr`。CI 的 `coverage` job 跑同一套命令，
+行覆盖率低于 **85%** 时失败（当前 87.2%）。
+
+两个口径要注意：**必须合并全部 TU 的计数**——C++ 模块的函数体在导入方 TU 里 codegen，
+逐 `.gcno` 读会把 `formatter.cppm` 读成「2 行」；另外无异常变体不参与统计，否则同一份
+源码的两份计数会混在一起。分支覆盖率不设门槛，原因见 `ci.yml` 里的注释。
+
 ## 格式与静态检查
 
 ```sh

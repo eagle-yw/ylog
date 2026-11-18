@@ -29,6 +29,19 @@
             }
         },
         {
+            "name": "gcc16-cov",
+            "displayName": "GCC 16.2.1 (覆盖率插桩)",
+            "description": "以 --coverage 构建供 gcovr 统计 src/ 覆盖率；不指定安装前缀，也不编无异常变体——同一份源码两份计数混在一起会让数字失去意义",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/out/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_CXX_FLAGS": "--coverage",
+                "CMAKE_EXE_LINKER_FLAGS": "--coverage",
+                "YLOG_BUILD_NOEXC_TESTS": "OFF"
+            }
+        },
+        {
             "name": "clang",
             "displayName": "Clang 23.1.5 (供 clangd 使用)",
             "description": "只服务 clangd：clang 23 无 P2996 反射，无法构建本库（见 issue #43）。生成编译数据库与模块 BMI；clangd 版本须与 clang 一致",
@@ -50,6 +63,10 @@
         {
             "name": "gcc16-noexc",
             "configurePreset": "gcc16-noexc"
+        },
+        {
+            "name": "gcc16-cov",
+            "configurePreset": "gcc16-cov"
         }
     ]
 }

@@ -56,3 +56,31 @@ jobs:
         run: cmake --build build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  # 覆盖率只统计 src/（库本身），门槛落在行覆盖率上。
+  # 分支覆盖率不设门槛：C++ 模块下函数体在导入方 TU 里 codegen，分母被模板实例化与
+  # 异常边放大，实测 51% 并不代表逻辑缺失，拿它当闸门会逼人写无意义的用例。
+  coverage:
+    name: coverage (gcovr, lines >= 85%)
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - name: Install toolchain
+        run: |
+          pacman -Syu --noconfirm --quiet --needed archlinux-keyring
+          pacman -S --noconfirm --quiet --needed gcc cmake ninja git gcovr
+          gcovr --version | head -1
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset gcc16-cov
+      - name: Build
+        run: cmake --build --preset gcc16-cov
+      - name: Test
+        run: ctest --test-dir out/build/gcc16-cov --output-on-failure
+      # 先出报告再判门槛：门槛不达标时也要能看见是哪个文件掉下来的。
+      - name: Coverage report
+        run: |
+          gcovr --root . --filter 'src/' --txt coverage.txt out/build/gcc16-cov
+          cat coverage.txt
+      - name: Enforce line coverage floor
+        run: gcovr --root . --filter 'src/' --fail-under-line 85 out/build/gcc16-cov
