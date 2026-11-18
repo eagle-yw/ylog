@@ -39,12 +39,18 @@ TEST(RegistryTest, DefaultSlotOwnsItsSinkSet) {
     auto& registry = ylog::Registry::instance();
 
     // 初始集合由 Registry 在创建期给定：恰好一个 StdoutSink（ADR-0011）。
-    EXPECT_EQ(ylog::default_logger().sinks().size(), 1);
+    EXPECT_EQ(ylog::default_logger().sinks().size(), 1u);
 
     // 保留名的集合不接受外部指定：给了 sink 就报错，而不是静默丢弃。
     EXPECT_THROW(registry.create(ylog::LoggerConfig{
                      .name = std::string(ylog::default_logger_name),
                      .sinks = ylog::make_sinks(ylog::AnySink{ylog::NullSink{}, "%v"})}),
+                 std::invalid_argument);
+
+    // 级别同属创建期定型：显式指定同样报错，而不是静默丢弃；改级别的唯一入口是
+    // set_level（见 FreeFunctionsTargetDefaultSlot）。
+    EXPECT_THROW(registry.create(ylog::LoggerConfig{.name = std::string(ylog::default_logger_name),
+                                                    .level = ylog::Level::Debug}),
                  std::invalid_argument);
 }
 
@@ -99,6 +105,19 @@ TEST(RegistryAsyncTest, RejectsNameCollisionAcrossTypes) {
     EXPECT_THROW(registry.create("collision-async"), std::invalid_argument);
 
     registry.drop_all();
+}
+
+TEST(RegistryAsyncTest, RejectsReservedDefaultName) {
+    auto& registry = ylog::Registry::instance();
+
+    // default 是保留名：异步注册一律拒绝，与槽位是否已经懒创建无关。
+    EXPECT_THROW(
+        registry.create_async(std::string(ylog::default_logger_name), ylog::AsyncLoggerConfig{}),
+        std::invalid_argument);
+    EXPECT_EQ(registry.get_async("default"), nullptr);
+
+    // 这次拒绝没有把 default 变成异步组件，同步侧的语义照旧。
+    EXPECT_EQ(&registry.create("default"), &ylog::default_logger());
 }
 
 TEST(RegistryAsyncTest, SetLevelByNameFiltersAsyncMessages) {

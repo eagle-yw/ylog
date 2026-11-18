@@ -56,6 +56,19 @@ target_link_libraries(unit_test
 
 add_test(NAME unit_test COMMAND unit_test)
 
+# default 保留名的 async-first 时序需要一个未被污染的 Registry：unit_test 是共享进程，
+# 其中的 default 槽位多半已经创建。这个可执行文件只跑这一组用例。
+# 本用例依赖异常，noexc 分支在上方已 return()，无需额外处理。
+add_executable(registry_fresh_test registry_fresh_test.cpp)
+
+target_link_libraries(registry_fresh_test
+    gtest
+    gtest_main
+    ylog
+)
+
+add_test(NAME registry_fresh_test COMMAND registry_fresh_test)
+
 # pattern flag oracle 测试：以 spdlog 1.17.0 的实际输出为准绳（research/pattern-flags.md）。
 # 系统 spdlog 不足 1.17 时从源码拉取；离线环境可用
 # -DFETCHCONTENT_SOURCE_DIR_SPDLOG=/path/to/spdlog-1.17.0 指向本地副本。

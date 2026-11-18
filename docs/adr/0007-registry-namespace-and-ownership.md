@@ -1,6 +1,6 @@
 # Registry 的命名空间与所有权
 
-同步 `Logger` 与异步 `AsyncLogger` 共用一个名字空间：一个名字只属于一个组件，`Registry` 内部用一张表存 `{synchronous, asynchronous}` 两个指针（恰有一个非空），不再维护两张平行 map。`create(name)` 对同名同步 logger 幂等，撞上异步组件时抛 `std::invalid_argument`；`create_async(name, config)` 撞上任何已用名字都抛 `std::invalid_argument`；`get`/`get_async` 按类型查找，名字属于另一类时返回 `nullptr`——查找不跨类型，创建不共享名字。`contains(name)` 两侧都算。
+同步 `Logger` 与异步 `AsyncLogger` 共用一个名字空间：一个名字只属于一个组件，`Registry` 内部用一张表存 `{synchronous, asynchronous}` 两个指针（恰有一个非空），不再维护两张平行 map。`create(name)` 对同名同步 logger 幂等，撞上异步组件时抛 `std::invalid_argument`；`create_async(name, config)` 撞上任何已用名字都抛 `std::invalid_argument`（`default` 是保留名，未被占用时亦抛，见 ADR-0010）；`get`/`get_async` 按类型查找，名字属于另一类时返回 `nullptr`——查找不跨类型，创建不共享名字。`contains(name)` 两侧都算。
 
 所有权只有一份：`Registry` 是唯一持有者，`drop`/`drop_all` 先把条目移出表、再在锁外析构，因此异步组件的排空发生在 `drop` 返回之前，而不是等某个外部持有者离开作用域。异步组件对外只给引用，不发布 `shared_ptr`，所以「最后持有者析构才停机」这种模型在这个接口下无法成立，规范按现状写。
 

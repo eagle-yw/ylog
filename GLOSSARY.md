@@ -70,5 +70,5 @@ _Avoid_: 丢弃统计、溢出次数
 **Registry**：按名称管理 `Logger` 实例的集中位置，负责创建、查找与移除；创建是 sink 集合的定型点。
 _Avoid_: 日志管理器、factory
 
-**Default 槽位**：Registry 中名为 `default` 的常驻条目，由 `Registry::default_logger()` 独家创建，初始 Sink Set 就是一个 `StdoutSink`；不可摘除，因为自由函数缓存了它的引用。
+**Default 槽位**：Registry 中名为 `default` 的常驻条目，由 `Registry::default_logger()` 独家创建，初始 Sink Set 就是一个 `StdoutSink`；不可摘除，因为自由函数缓存了它的引用。`default` 是**保留名**：它先于槽位创建生效，`create_async("default")` 无条件拒绝且不留槽位，而 `contains("default")` 在首次使用前仍为 `false`。
 _Avoid_: 全局 logger、根 logger、默认实例
