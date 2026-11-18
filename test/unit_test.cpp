@@ -1653,6 +1653,88 @@ TEST(AsyncLoggerTest, StopDrainsQueueAndLaterLogReportsOnce) {
     EXPECT_EQ(view.snapshot().size(), 100u);
 }
 
+TEST(AsyncLoggerTest, FlushIsABarrierForEveryCallerUnderConcurrency) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+    logger.append_sink(view, "%v");
+
+    constexpr auto thread_count = 4;
+    constexpr auto per_thread = 20;
+    auto missing = std::atomic<int>{0};
+
+    auto produce = [&logger, &view, &missing](int tid) {
+        for (int i = 0; i < per_thread; ++i) {
+            auto line = std::format("t{}-{}", tid, i);
+            logger.info({}, "{}", line);
+            logger.flush();
+            // flush() 返回后，本线程刚写的那条必须已在落盘集合里：
+            // 多条并发 flush 合并到同一条控制消息时，也不能被提前结清。
+            auto lines = view.snapshot();
+            if (std::find(lines.begin(), lines.end(), line + "\n") == lines.end()) {
+                ++missing;
+            }
+        }
+    };
+
+    auto pool = std::vector<std::jthread>{};
+    for (int tid = 0; tid < thread_count; ++tid) {
+        pool.emplace_back(produce, tid);
+    }
+    for (auto& worker : pool) {
+        worker.join();
+    }
+
+    EXPECT_EQ(missing.load(), 0) << "有调用方的 flush() 在消息落盘前就返回了";
+}
+
+TEST(AsyncLoggerTest, StopRejectsQueuedProducersAndLaterLogs) {
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+
+    auto entered = std::counting_semaphore<64>{0};
+    auto release = std::counting_semaphore<64>{0};
+    auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
+        .name = "async", .queue_capacity = 2, .err_handler = reports.handler()});
+    logger.append_sink(GatedRecordingSink{state, &entered, &release}, "%v");
+
+    logger.info({}, "m0");
+    ASSERT_TRUE(entered.try_acquire_for(std::chrono::milliseconds(1000)))
+        << "worker 没有进入 write";
+    logger.info({}, "m1");
+    logger.info({}, "m2");
+
+    // 队列已满且 worker 被钉住：这个生产者会停在 Block 的容量等待上。
+    auto blocked = std::binary_semaphore{0};
+    auto blocked_producer = std::jthread([&logger, &blocked] {
+        logger.info({}, "m3");
+        blocked.release();
+    });
+
+    auto stopper = std::jthread([&logger] { logger.stop(); });
+
+    // 停止请求必须立刻让卡在容量等待上的生产者放弃入队，而不是等队列腾出空位。
+    EXPECT_TRUE(blocked.try_acquire_for(std::chrono::seconds(2)))
+        << "停止请求之后，卡在 Block 上的生产者仍在等待容量";
+
+    // 闸门对每次 write 都生效，多放几张通行证让排空能走完（多余许可留在计数器里）。
+    for (int i = 0; i < 8; ++i) {
+        release.release();
+    }
+
+    logger.info({}, "late");
+
+    stopper.join();
+    blocked_producer.join();
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 1u) << "停止之后的首条拒绝没有上报";
+    EXPECT_NE(reported[0].find("m3"), std::string::npos) << reported[0];
+    EXPECT_EQ(view.snapshot().size(), 3u) << "停止请求之后仍有多余消息落盘";
+}
+
 TEST(AsyncLoggerTest, FlushAfterStopStillFlushesSinks) {
     auto directory = temp_test_path("async-flush-after-stop");
     std::filesystem::create_directories(directory);
@@ -1673,6 +1755,41 @@ TEST(AsyncLoggerTest, FlushAfterStopStillFlushesSinks) {
             << "停止后的 flush() 没有立即返回";
         EXPECT_EQ(read_all(path), "kept\n");
     }
+
+    std::filesystem::remove_all(directory);
+}
+
+TEST(AsyncLoggerTest, ConcurrentFlushAfterStopIsSafeAndComplete) {
+    auto directory = temp_test_path("async-flush-after-stop-concurrent");
+    std::filesystem::create_directories(directory);
+    auto path = directory / "stopped.log";
+
+    {
+        auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
+        logger.append_sink(ylog::FileSink(path.string()), "%v");
+        for (int i = 0; i < 100; ++i) {
+            logger.info({}, "line-{}", i);
+        }
+        logger.stop();
+
+        // 停止后没有 worker 可排队，多个调用线程会各自 flush sink；AnySink 的
+        // output_mutex_ 保证同一 sink 串行。这里断言这条路径既不死锁也不丢内容。
+        auto pool = std::vector<std::jthread>{};
+        for (int tid = 0; tid < 4; ++tid) {
+            pool.emplace_back([&logger] {
+                for (int i = 0; i < 20; ++i) {
+                    logger.flush();
+                }
+            });
+        }
+        for (auto& worker : pool) {
+            worker.join();
+        }
+    }
+
+    auto content = read_all(path);
+    auto lines = std::count(content.begin(), content.end(), '\n');
+    EXPECT_EQ(lines, static_cast<std::ptrdiff_t>(100)) << "停止后的并发 flush 丢行";
 
     std::filesystem::remove_all(directory);
 }
