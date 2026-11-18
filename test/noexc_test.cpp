@@ -110,26 +110,17 @@ auto snapshot(MeasuredSink::State& state) -> std::vector<std::pair<int, int>> {
     return state.lines;
 }
 
-// 上报计数交给 err_handler：非阻塞策略会从多个生产者线程并发调用它。
-struct OverflowReports {
-    std::shared_ptr<std::atomic<int>> overrun = std::make_shared<std::atomic<int>>(0);
-    std::shared_ptr<std::atomic<int>> discarded = std::make_shared<std::atomic<int>>(0);
-    std::shared_ptr<std::atomic<int>> other = std::make_shared<std::atomic<int>>(0);
+// 上报计数：err_handler 可能被多个生产者线程并发调用。每次冒烟只跑一种策略、
+// 场景里也没有别的失败来源，所以只数次数，不对文案做子串匹配——文案不是契约。
+struct ReportCounter {
+    std::shared_ptr<std::atomic<int>> count = std::make_shared<std::atomic<int>>(0);
 
     auto handler() const -> ylog::ErrorHandler {
-        auto overrun_count = overrun;
-        auto discarded_count = discarded;
-        auto other_count = other;
-        return [overrun_count, discarded_count, other_count](std::string_view message) {
-            if (message.find("OverrunOldest") != std::string_view::npos) {
-                overrun_count->fetch_add(1, std::memory_order_relaxed);
-            } else if (message.find("DiscardNew") != std::string_view::npos) {
-                discarded_count->fetch_add(1, std::memory_order_relaxed);
-            } else {
-                other_count->fetch_add(1, std::memory_order_relaxed);
-            }
-        };
+        auto captured = count;
+        return [captured](std::string_view) { captured->fetch_add(1, std::memory_order_relaxed); };
     }
+
+    auto load() const -> int { return count->load(std::memory_order_relaxed); }
 };
 
 // 并发冒烟：4 个生产者 × 50 条，队列容量 16 刻意小于产量，
@@ -141,7 +132,7 @@ auto smoke_concurrent_producers(ylog::OverflowPolicy policy, std::string_view la
     constexpr auto total = producer_count * per_producer;
 
     auto state = std::make_shared<MeasuredSink::State>();
-    auto reports = OverflowReports{};
+    auto reports = ReportCounter{};
 
     auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{
         .name = std::string(label),
@@ -167,25 +158,14 @@ auto smoke_concurrent_producers(ylog::OverflowPolicy policy, std::string_view la
     logger.flush();  // 屏障：返回时已入队的行全部落盘
 
     auto lines = snapshot(*state);
-    auto dropped = int{0};
-    if (policy == ylog::OverflowPolicy::OverrunOldest) {
-        dropped = reports.overrun->load(std::memory_order_relaxed);
-    } else if (policy == ylog::OverflowPolicy::DiscardNew) {
-        dropped = reports.discarded->load(std::memory_order_relaxed);
-    }
+    // 本场景里唯一的上报来源就是溢出丢弃，计数即丢弃数。
+    auto dropped = reports.load();
 
     check(lines.size() + static_cast<std::size_t>(dropped) == static_cast<std::size_t>(total),
           std::format("{}: 投递数 + 丢弃数 == 生产数", label));
-    check(reports.other->load(std::memory_order_relaxed) == 0,
-          std::format("{}: 只有计划内的溢出上报", label));
-    check(reports.overrun->load(std::memory_order_relaxed) == 0 ||
-              policy == ylog::OverflowPolicy::OverrunOldest,
-          std::format("{}: 未误报覆盖", label));
-    check(reports.discarded->load(std::memory_order_relaxed) == 0 ||
-              policy == ylog::OverflowPolicy::DiscardNew,
-          std::format("{}: 未误报丢弃", label));
     if (policy == ylog::OverflowPolicy::Block) {
         check(lines.size() == static_cast<std::size_t>(total), "Block: 一条不丢");
+        check(dropped == 0, "Block: 不应有任何溢出上报");
     } else {
         check(dropped > 0, std::format("{}: 小容量确实制造了丢弃", label));
     }
@@ -214,7 +194,7 @@ auto async_survives_sink_write_failure() -> void {
 
     auto state = std::make_shared<MeasuredSink::State>();
     auto sink_reports = std::make_shared<std::atomic<int>>(0);
-    auto logger_reports = OverflowReports{};
+    auto logger_reports = ReportCounter{};
 
     auto sink_config = ylog::RotatingFileConfig{};
     sink_config.filename = "/dev/full";
@@ -237,8 +217,7 @@ auto async_survives_sink_write_failure() -> void {
     check(sink_reports->load(std::memory_order_relaxed) > 0,
           "sink 写失败经注入的 err_handler 上报");
     check(snapshot(*state).size() == 2, "另一个 sink 不受失败影响");
-    check(logger_reports.other->load(std::memory_order_relaxed) == 0,
-          "sink 失败不经 AsyncLogger 的 err_handler 转手");
+    check(logger_reports.load() == 0, "sink 失败不经 AsyncLogger 的 err_handler 转手");
 }
 
 }  // namespace

@@ -3,6 +3,74 @@
 import std;
 import ylog;
 
+// 测试夹具与探针行解析：放文件级匿名命名空间，让早于各 TEST 段的用例也能用。
+namespace {
+
+// 把 worker 钉在一次 write 上的闸门：write 先放行 entered，再等 release。
+struct SinkGate {
+    std::counting_semaphore<64> entered{0};
+    std::counting_semaphore<64> release{0};
+};
+
+struct BlockingSink {
+    SinkGate* gate = nullptr;
+
+    auto write(std::string_view) -> void {
+        gate->entered.release();
+        gate->release.acquire();
+    }
+    auto flush() -> void {}
+};
+
+struct ThrowingSink {
+    auto write(std::string_view) -> void { throw std::runtime_error("boom"); }
+    auto flush() -> void {}
+};
+
+// 测试自己造的行：生产者号-序号-固定载荷。按字段解析而不是按下标切字符串，
+// 断言失败时才说得清是哪个字段坏了。
+struct ProbeLine {
+    int producer = 0;
+    int sequence = 0;
+    std::string payload;
+};
+
+auto parse_probe_line(std::string_view line) -> std::optional<ProbeLine> {
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+        line.remove_suffix(1);
+    }
+
+    auto to_int = [](std::string_view text) -> std::optional<int> {
+        if (text.empty()) {
+            return std::nullopt;
+        }
+        auto value = 0;
+        for (auto ch : text) {
+            if (ch < '0' || ch > '9') {
+                return std::nullopt;
+            }
+            value = value * 10 + (ch - '0');
+        }
+        return value;
+    };
+
+    auto fields = std::vector<std::string_view>{};
+    for (auto part : std::views::split(line, '-')) {
+        fields.emplace_back(part.begin(), part.end());
+    }
+    if (fields.size() != 3) {
+        return std::nullopt;
+    }
+    auto producer = to_int(fields[0]);
+    auto sequence = to_int(fields[1]);
+    if (!producer || !sequence) {
+        return std::nullopt;
+    }
+    return ProbeLine{*producer, *sequence, std::string(fields[2])};
+}
+
+}  // namespace
+
 struct Point {
     int x;
     double y;
@@ -304,7 +372,10 @@ TEST(FormatterTest, UnknownFlagRemainsLiteral) {
 }
 
 TEST(FormatterTest, PatternFlags) {
-    struct Capture { std::string* out; auto write(std::string_view s) -> void { *out += s; } };
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view s) -> void { *out += s; }
+    };
 
     auto logger = ylog::Logger("flags");
     logger.set_level(ylog::Level::Info);
@@ -317,7 +388,10 @@ TEST(FormatterTest, PatternFlags) {
 }
 
 TEST(FormatterTest, PerSinkPattern) {
-    struct Capture { std::string* out; auto write(std::string_view s) -> void { *out += s; } };
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view s) -> void { *out += s; }
+    };
 
     auto logger = ylog::Logger("multi");
     logger.set_level(ylog::Level::Info);
@@ -332,7 +406,10 @@ TEST(FormatterTest, PerSinkPattern) {
 }
 
 TEST(FormatterTest, SetPatternFanout) {
-    struct Capture { std::string* out; auto write(std::string_view s) -> void { *out += s; } };
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view s) -> void { *out += s; }
+    };
 
     auto logger = ylog::Logger("fanout");
     logger.set_level(ylog::Level::Info);
@@ -347,7 +424,10 @@ TEST(FormatterTest, SetPatternFanout) {
 }
 
 TEST(FormatterTest, PerSinkCustomFlagRegistrations) {
-    struct Capture { std::string* out; auto write(std::string_view s) -> void { *out += s; } };
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view s) -> void { *out += s; }
+    };
     struct First {
         auto format(const ylog::Message&, const std::tm&, std::string& dest) -> void {
             dest.append("FIRST");
@@ -376,7 +456,10 @@ TEST(FormatterTest, PerSinkCustomFlagRegistrations) {
 }
 
 TEST(FormatterTest, SetPatternFanoutPreservesCustomFlags) {
-    struct Capture { std::string* out; auto write(std::string_view s) -> void { *out += s; } };
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view s) -> void { *out += s; }
+    };
     struct Marker {
         auto format(const ylog::Message&, const std::tm&, std::string& dest) -> void {
             dest.append("C");
@@ -401,7 +484,10 @@ TEST(FormatterTest, SetPatternFanoutPreservesCustomFlags) {
 }
 
 TEST(LoggerTest, SetPatternRejectsNonPatternFormatter) {
-    struct Capture { std::string* out; auto write(std::string_view s) -> void { *out += s; } };
+    struct Capture {
+        std::string* out;
+        auto write(std::string_view s) -> void { *out += s; }
+    };
     struct PlainFormatter final : ylog::Formatter {
         auto format(const ylog::Message&, std::string& dest) -> void override {
             dest.append("plain\n");
@@ -505,13 +591,11 @@ TEST(SinkConcurrencyTest, ConcurrentWritesKeepEveryLineIntact) {
         auto end = output.find('\n', pos);
         ASSERT_NE(end, std::string::npos) << "unterminated line at offset " << pos;
         auto line = std::string_view(output).substr(pos, end - pos);
-        ASSERT_EQ(line.size(), 47u) << "clobbered line: " << std::string(line);
-        ASSERT_EQ(line[1], '-');
-        ASSERT_EQ(line[6], '-');
-        ASSERT_EQ(line.substr(7), std::string(40, 'x'));
-        auto tid = line[0] - '0';
-        auto sequence = std::stoi(std::string(line.substr(2, 4)));
-        EXPECT_TRUE(seen.emplace(tid, sequence).second) << "duplicate line " << std::string(line);
+        auto parsed = parse_probe_line(line);
+        ASSERT_TRUE(parsed.has_value()) << "clobbered line: " << std::string(line);
+        EXPECT_EQ(parsed->payload, std::string(40, 'x')) << "payload corrupted in " << line;
+        EXPECT_TRUE(seen.emplace(parsed->producer, parsed->sequence).second)
+            << "duplicate line " << line;
         pos = end + 1;
     }
     EXPECT_EQ(seen.size(), static_cast<std::size_t>(thread_count) * per_thread);
@@ -540,7 +624,8 @@ TEST(SinkConcurrencyTest, FormattingDoesNotHoldTheOutputLock) {
         auto pattern() const -> std::string_view override { return ""; }
     };
 
-    struct BlockingSink {
+    // 与文件级的 BlockingSink 不同：这里只需要「占住输出锁」，不关心进出配对。
+    struct HeldOutputSink {
         Gate* gate;
         auto write(std::string_view) -> void {
             gate->in_write = true;
@@ -549,7 +634,7 @@ TEST(SinkConcurrencyTest, FormattingDoesNotHoldTheOutputLock) {
     };
 
     Gate gate;
-    auto sink = ylog::AnySink(BlockingSink{&gate}, std::make_unique<ProbeFormatter>(&gate));
+    auto sink = ylog::AnySink(HeldOutputSink{&gate}, std::make_unique<ProbeFormatter>(&gate));
     auto message = ylog::Message(ylog::Level::Info, "n", {}, "msg");
 
     std::thread first([&sink, &message] { sink.write(message); });
@@ -578,8 +663,8 @@ namespace {
 auto temp_test_path(std::string_view name) -> std::filesystem::path {
     static std::atomic<std::uint64_t> counter{0};
     auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    return std::filesystem::temp_directory_path()
-        / std::format("ylog-rotating-{}-{}-{}", name, stamp, counter.fetch_add(1));
+    return std::filesystem::temp_directory_path() /
+           std::format("ylog-rotating-{}-{}-{}", name, stamp, counter.fetch_add(1));
 }
 
 auto read_all(const std::filesystem::path& path) -> std::string {
@@ -600,7 +685,7 @@ auto local_time_point(int year, int month, int day, int hour, int minute, int se
     return std::chrono::system_clock::from_time_t(std::mktime(&value));
 }
 
-} // namespace
+}  // namespace
 
 TEST(RotatingFileSinkTest, WritesConfiguredFile) {
     static_assert(ylog::Sink<ylog::RotatingFileSink>);
@@ -1304,21 +1389,7 @@ TEST(AsyncLoggerTest, FiltersBelowThresholdBeforeEnqueue) {
 }
 
 TEST(AsyncLoggerTest, ReturnsWithoutWaitingForSink) {
-    struct Gate {
-        std::counting_semaphore<2> entered{0};
-        std::counting_semaphore<2> release{0};
-    };
-    struct BlockingSink {
-        Gate* gate = nullptr;
-
-        auto write(std::string_view) -> void {
-            gate->entered.release();
-            gate->release.acquire();
-        }
-        auto flush() -> void {}
-    };
-
-    Gate gate;
+    auto gate = SinkGate{};
     auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async"});
     logger.append_sink(BlockingSink{&gate}, "%v");
 
@@ -1364,11 +1435,11 @@ TEST(AsyncLoggerTest, ConcurrentProducersDeliverEveryLineIntact) {
 
     auto seen = std::set<std::pair<int, int>>{};
     for (const auto& line : lines) {
-        ASSERT_EQ(line.size(), 48u) << "clobbered line: " << line;
-        auto tid = line[0] - '0';
-        auto sequence = std::stoi(line.substr(2, 4));
-        ASSERT_EQ(line.substr(7), std::string(40, 'x') + "\n");
-        EXPECT_TRUE(seen.emplace(tid, sequence).second) << "duplicate line " << line;
+        auto parsed = parse_probe_line(line);
+        ASSERT_TRUE(parsed.has_value()) << "clobbered line: " << line;
+        EXPECT_EQ(parsed->payload, std::string(40, 'x')) << "payload corrupted in " << line;
+        EXPECT_TRUE(seen.emplace(parsed->producer, parsed->sequence).second)
+            << "duplicate line " << line;
     }
     EXPECT_EQ(seen.size(), static_cast<std::size_t>(thread_count) * per_thread);
 }
@@ -1393,21 +1464,7 @@ TEST(AsyncLoggerTest, DrainsQueueInOrderOnDestruction) {
 }
 
 TEST(AsyncLoggerTest, BlocksProducerWhenQueueIsFull) {
-    struct Gate {
-        std::counting_semaphore<8> entered{0};
-        std::counting_semaphore<8> release{0};
-    };
-    struct BlockingSink {
-        Gate* gate = nullptr;
-
-        auto write(std::string_view) -> void {
-            gate->entered.release();
-            gate->release.acquire();
-        }
-        auto flush() -> void {}
-    };
-
-    Gate gate;
+    auto gate = SinkGate{};
     auto logger = ylog::AsyncLogger(ylog::AsyncLoggerConfig{.name = "async", .queue_capacity = 1});
     logger.append_sink(BlockingSink{&gate}, "%v");
 
@@ -1797,11 +1854,6 @@ TEST(AsyncLoggerTest, ConcurrentFlushAfterStopIsSafeAndComplete) {
 }
 
 TEST(AsyncLoggerTest, SinkFailureIsReportedAndOtherSinksKeepWorking) {
-    struct ThrowingSink {
-        auto write(std::string_view) -> void { throw std::runtime_error("boom"); }
-        auto flush() -> void {}
-    };
-
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
     auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
@@ -1858,10 +1910,6 @@ TEST(AsyncLoggerTest, SinkFailureReportsAgainAfterSuccessfulWrite) {
 }
 
 TEST(AsyncLoggerTest, HandlerExceptionDoesNotKillWorker) {
-    struct ThrowingSink {
-        auto write(std::string_view) -> void { throw std::runtime_error("boom"); }
-        auto flush() -> void {}
-    };
     struct ThrowingHandler {
         auto operator()(std::string_view) const -> void { throw std::runtime_error("handler"); }
     };
