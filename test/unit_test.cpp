@@ -1622,7 +1622,7 @@ TEST(AsyncLoggerTest, FlushIsABarrierForEachProducingThread) {
     EXPECT_EQ(view.snapshot().size(), 4u);
 }
 
-TEST(AsyncLoggerTest, StopDrainsQueueAndLaterLogReportsOnce) {
+TEST(AsyncLoggerTest, StopDrainsQueueAndEveryLaterLogIsReported) {
     auto state = std::make_shared<AsyncRecordingSink::State>();
     auto view = AsyncRecordingSink{state};
     auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
@@ -1648,8 +1648,9 @@ TEST(AsyncLoggerTest, StopDrainsQueueAndLaterLogReportsOnce) {
         << "停止后的 log() 阻塞了调用线程";
 
     auto reported = reports.snapshot();
-    ASSERT_EQ(reported.size(), 1u) << "停止后重复入队只应上报一次";
+    ASSERT_EQ(reported.size(), 2u) << "停止后每次入队都应上报，后续丢弃不得静默";
     EXPECT_NE(reported[0].find("after-stop-1"), std::string::npos) << reported[0];
+    EXPECT_NE(reported[1].find("after-stop-2"), std::string::npos) << reported[1];
     EXPECT_EQ(view.snapshot().size(), 100u);
 }
 
@@ -1730,8 +1731,9 @@ TEST(AsyncLoggerTest, StopRejectsQueuedProducersAndLaterLogs) {
     blocked_producer.join();
 
     auto reported = reports.snapshot();
-    ASSERT_EQ(reported.size(), 1u) << "停止之后的首条拒绝没有上报";
+    ASSERT_EQ(reported.size(), 2u) << "停止之后每次拒绝都应上报";
     EXPECT_NE(reported[0].find("m3"), std::string::npos) << reported[0];
+    EXPECT_NE(reported[1].find("late"), std::string::npos) << reported[1];
     EXPECT_EQ(view.snapshot().size(), 3u) << "停止请求之后仍有多余消息落盘";
 }
 
@@ -1816,9 +1818,43 @@ TEST(AsyncLoggerTest, SinkFailureIsReportedAndOtherSinksKeepWorking) {
         << "第一个 sink 抛异常后工作线程没有继续投递";
 
     auto reported = reports.snapshot();
-    ASSERT_EQ(reported.size(), 2u) << "每条消息应对失败 sink 上报一次";
+    ASSERT_EQ(reported.size(), 1u) << "连续失败只应在进入失败状态时上报一次";
     EXPECT_NE(reported[0].find("boom"), std::string::npos) << reported[0];
     EXPECT_EQ(view.snapshot().size(), 2u);
+}
+
+TEST(AsyncLoggerTest, SinkFailureReportsAgainAfterSuccessfulWrite) {
+    struct FlakySink {
+        std::shared_ptr<int> calls = std::make_shared<int>(0);
+
+        auto write(std::string_view) -> void {
+            if (++*calls % 2 == 1) {
+                throw std::runtime_error("boom");
+            }
+        }
+        auto flush() -> void {}
+    };
+
+    auto state = std::make_shared<AsyncRecordingSink::State>();
+    auto view = AsyncRecordingSink{state};
+    auto reports = ErrorReports{std::make_shared<ErrorReports::State>()};
+
+    auto logger = ylog::AsyncLogger(
+        ylog::AsyncLoggerConfig{.name = "async", .err_handler = reports.handler()});
+    logger.append_sink(FlakySink{}, "%v");
+    logger.append_sink(view, "%v");
+
+    // 失败 → 成功 → 失败：成功那次应解除「已上报」状态，于是第二段失败再报一次。
+    logger.info({}, "a");
+    logger.info({}, "b");
+    logger.info({}, "c");
+
+    ASSERT_TRUE(view.wait_for(3, std::chrono::milliseconds(1000)));
+
+    auto reported = reports.snapshot();
+    ASSERT_EQ(reported.size(), 2u) << "两段失败应各上报一次，中间的成功要复位状态";
+    EXPECT_NE(reported[0].find("boom"), std::string::npos) << reported[0];
+    EXPECT_EQ(view.snapshot().size(), 3u);
 }
 
 TEST(AsyncLoggerTest, HandlerExceptionDoesNotKillWorker) {

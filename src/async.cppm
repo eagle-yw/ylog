@@ -104,7 +104,7 @@ public:
           overflow_policy_(config.overflow_policy),
           err_handler_(std::move(config.err_handler)) {
         validate_config();
-        sinks_.emplace_back(StdoutSink{});
+        sinks_.push_back(SinkSlot{AnySink{StdoutSink{}}});
         worker_ = std::jthread([this](std::stop_token token) { run(token); });
     }
 
@@ -116,7 +116,7 @@ public:
     // 先请求停止，再由工作线程按 FIFO 排空队列，最后 join。
     ~AsyncLogger() { stop(); }
 
-    // 显式停机：排空后返回。可重复调用；停止后的 log() 立即失败并只上报一次。
+    // 显式停机：排空后返回。可重复调用；停止后的每次 log() 都立即失败并各自上报。
     //
     // stopping_ 先于 request_stop 置位：「要排空的集合」必须是停止请求之前已入队的
     // 消息。否则持续生产者会在排空窗口里继续追加，worker 永远看不到空队列，join 挂住。
@@ -144,19 +144,20 @@ public:
     // 追加 sink，可为其单独指定 pattern（formatter 归属 sink）。
     template <Sink T>
     auto append_sink(T&& sink, std::string_view pattern = default_pattern) -> void {
-        sinks_.emplace_back(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern));
+        sinks_.push_back(
+            SinkSlot{AnySink(std::forward<T>(sink), std::make_unique<PatternFormatter>(pattern))});
     }
 
     // 追加 sink 并注入配置好的 formatter（可带自定义 flag）。
     template <Sink T>
     auto append_sink(T&& sink, std::unique_ptr<Formatter> formatter) -> void {
-        sinks_.emplace_back(std::forward<T>(sink), std::move(formatter));
+        sinks_.push_back(SinkSlot{AnySink(std::forward<T>(sink), std::move(formatter))});
     }
 
     // 为所有 sink 设置 pattern（扇出）。
     auto set_pattern(std::string_view pattern) -> void {
-        for (auto& sink : sinks_) {
-            sink.set_pattern(pattern);
+        for (auto& slot : sinks_) {
+            slot.sink.set_pattern(pattern);
         }
     }
 
@@ -246,7 +247,9 @@ public:
             report(std::format("溢出：丢弃新消息 {}（策略 discard_new）", message.formatted()));
         }
         if (rejected_after_stop) {
-            report_stopped_once(message.formatted());
+            // 每次拒绝都上报：spec 的通知面只有 err_handler，靠默认 handler 的限频
+            // 控制输出量，而不是在这里把后续的丢失静默掉。
+            report(std::format("组件已停止，丢弃消息 {}", message.formatted()));
         }
     }
 
@@ -320,32 +323,33 @@ private:
         }
     }
 
-    // 停止后的首次入队上报一次，避免刷屏。
-    auto report_stopped_once(std::string_view text) -> void {
-        {
-            std::lock_guard lock(mutex_);
-            if (stop_reported_) {
-                return;
-            }
-            stop_reported_ = true;
-        }
-        report(std::format("组件已停止，丢弃消息 {}", text));
-    }
-
     // 单个 sink 失败只上报并跳过：异常不得逃出工作线程，也不影响其它 sink。
-    // 无异常构建下 sink 不会抛，守卫退化为直接调用。
+    // 连续失败只上报一次，避免坏 sink 在每条消息上刷屏；解除条件是它下一次写成功。
+    // 无异常构建下 sink 不会抛，守卫退化为直接调用，失败由 sink 自己的 handler 上报。
     auto write_to_sinks(const Message& message) -> void {
-        for (auto& sink : sinks_) {
+        for (auto& slot : sinks_) {
+            auto failure = std::string{};
             detail::guard_sink_call(
-                [&sink, &message] { sink.write(message); },
-                [this](std::string_view why) { report(std::format("sink 写入失败：{}", why)); });
+                [&slot, &message] { slot.sink.write(message); },
+                [&failure](std::string_view why) { failure = std::string(why); });
+            if (failure.empty()) {
+                slot.failing = false;
+                continue;
+            }
+            if (slot.failing) {
+                continue;
+            }
+            slot.failing = true;
+            report(std::format("sink 写入失败：{}", failure));
         }
     }
 
+    // flush 失败算第三类触发点「某个 sink 投递失败」：数据没落盘同样是没送出去。
+    // 这里每次都上报——只有显式 flush 才走到这儿，频率由调用方控制。
     auto flush_sinks() -> void {
-        for (auto& sink : sinks_) {
+        for (auto& slot : sinks_) {
             detail::guard_sink_call(
-                [&sink] { sink.flush(); },
+                [&slot] { slot.sink.flush(); },
                 [this](std::string_view why) { report(std::format("sink flush 失败：{}", why)); });
         }
     }
@@ -398,7 +402,13 @@ private:
     OverflowPolicy overflow_policy_{OverflowPolicy::Block};
     ErrorHandler err_handler_;
 
-    std::vector<AnySink> sinks_;
+    // sink 与它的失败状态放在一起：连续失败只在进入失败状态时上报一次。
+    struct SinkSlot {
+        AnySink sink;
+        bool failing{false};
+    };
+
+    std::vector<SinkSlot> sinks_;
     std::mutex mutex_;
     std::condition_variable_any cv_ready_;
     std::condition_variable_any cv_space_;
@@ -410,7 +420,6 @@ private:
     std::size_t flushed_sequence_{0};    // 已确认落盘的条数
     bool stopping_{false};
     bool worker_finished_{false};
-    bool stop_reported_{false};
     std::mutex join_mutex_;
     std::jthread worker_;
 };
