@@ -5,6 +5,11 @@
 //
 // 与 spdlog 的差异：ylog 的组件在构造期接管 sink 集合，因此这里直接把待测 sink
 // 传进去，构造后不再有默认 stdout sink 需要摘除。backtrace 场景 ylog 没有提供，不设。
+//
+// 所有场景统一 pattern "%v"：本表量的是 sink 路径（格式化 + 扇出 + 写出），
+// 逐行之间的差值才有意义。曾经 null 用 %v、file 用默认 pattern，两行不可比，
+// 会把时间戳格式化的成本记到「写盘」账上。pattern 本身的成本见 bench_formatter，
+// 端到端的分解见 bench_io。
 
 import std;
 import ylog;
@@ -18,20 +23,22 @@ constexpr auto rotating_files = std::size_t{5};
 constexpr auto max_threads = std::size_t{1000};
 
 auto file_sink(std::string_view name) -> ylog::AnySink {
-    return ylog::AnySink{ylog::FileSink{bench::log_path(bench_directory, name)}};
+    return ylog::AnySink{ylog::FileSink{bench::log_path(bench_directory, name)}, "%v"};
 }
 
 auto rotating_sink(std::string_view name) -> ylog::AnySink {
     return ylog::AnySink{ylog::RotatingFileSink{ylog::RotatingFileConfig{
-        .filename = bench::log_path(bench_directory, name),
-        .max_size = rotating_size,
-        .max_files = rotating_files,
-    }}};
+                             .filename = bench::log_path(bench_directory, name),
+                             .max_size = rotating_size,
+                             .max_files = rotating_files,
+                         }},
+                         "%v"};
 }
 
 auto daily_sink(std::string_view name) -> ylog::AnySink {
-    return ylog::AnySink{ylog::DailyFileSink{
-        ylog::DailyFileConfig{.filename = bench::log_path(bench_directory, name)}}};
+    return ylog::AnySink{ylog::DailyFileSink{ylog::DailyFileConfig{
+                             .filename = bench::log_path(bench_directory, name)}},
+                         "%v"};
 }
 
 // 单线程：跑 iterations 条。

@@ -4,6 +4,10 @@
 //   - Block：一条不丢，行数必须等于入队条数；
 //   - OverrunOldest：队列满时覆盖最旧，行数只少不多。
 // 用法：bench_async [消息数] [线程数] [队列容量] [迭代次数]
+//
+// pattern 与其它基准统一为 "%v"：本程序量的是入队与交接，不是格式化。
+// 用默认 pattern 时消费者要多付时间戳格式化的成本，队满阻塞的次数随之变化，
+// 数字会混进 formatter 的差价。
 
 import std;
 import ylog;
@@ -28,12 +32,14 @@ auto produce(ylog::AsyncLogger& logger, std::size_t per_thread) -> void {
 }
 
 auto run_round(const Options& options, std::string_view name, ylog::OverflowPolicy policy) -> void {
-    auto logger = bench::make_async_logger(std::string{name},
-                                           ylog::AnySink{ylog::FileSink{ylog::FileConfig{
-                                               .filename = bench::log_path(bench_directory, name),
-                                               .truncate_on_open = true,
-                                           }}},
-                                           options.queue_capacity, policy);
+    auto logger = bench::make_async_logger(
+        std::string{name},
+        ylog::AnySink{ylog::FileSink{ylog::FileConfig{
+                          .filename = bench::log_path(bench_directory, name),
+                          .truncate_on_open = true,
+                      }},
+                      "%v"},
+        options.queue_capacity, policy);
 
     auto per_thread = options.messages / options.threads;
     auto expected = per_thread * options.threads;

@@ -49,3 +49,6 @@ target_link_libraries(bench_latency PRIVATE bench_support benchmark::benchmark)
 
 add_executable(bench_formatter formatter_bench.cpp)
 target_link_libraries(bench_formatter PRIVATE bench_support benchmark::benchmark)
+
+add_executable(bench_io io_bench.cpp)
+target_link_libraries(bench_io PRIVATE bench_support benchmark::benchmark)

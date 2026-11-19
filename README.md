@@ -111,12 +111,13 @@ ctest --test-dir out/build/gcc16-noexc --output-on-failure
 
 ```sh
 cmake --preset gcc16-bench
-cmake --build --preset gcc16-bench --target bench_throughput bench_async bench_latency bench_formatter
+cmake --build --preset gcc16-bench --target bench_throughput bench_async bench_latency bench_formatter bench_io
 
 ./out/build/gcc16-bench/bench/bench_throughput 250000 4
 ./out/build/gcc16-bench/bench/bench_async 1000000 10 8192 3
 ./out/build/gcc16-bench/bench/bench_latency full
 ./out/build/gcc16-bench/bench/bench_formatter all
+./out/build/gcc16-bench/bench/bench_io
 ```
 
 | 程序 | 对应 spdlog | 度量 |
@@ -125,11 +126,17 @@ cmake --build --preset gcc16-bench --target bench_throughput bench_async bench_l
 | `bench_latency` | `latency.cpp` | Google Benchmark 量单条日志耗时；`full` 追加文件类与多线程变体 |
 | `bench_formatter` | `formatter-bench.cpp` | 单个 pattern flag 与整串 pattern 的格式化耗时 |
 | `bench_async` | `async_bench.cpp` | 异步入队吞吐，并校验溢出策略（Block 必须一条不丢）|
+| `bench_io` | 无 | 写盘路径分解：`ofstream` / `fwrite` / `write(2)` 原语、`FileSink` 单条写、`Logger` 端到端（`%v` 与默认 pattern 对照）|
 
 Google Benchmark 优先取系统包，缺失时由 FetchContent 拉 v1.9.1。两处刻意差异：
 ylog 没有 backtrace 与编译期关闭的宏，相应场景缺省；组件的 sink 集合在创建期定型，
 基准因此把待测 sink 直接传进 `LoggerConfig` / `AsyncLoggerConfig`，不存在「先装一个
 默认 sink 再换掉」这一步。日志文件落在**当前工作目录**的 `bench_logs/`。
+
+所有场景统一 pattern `"%v"`，行与行相减才是 sink 成本（`bench_io` 里另有默认
+pattern 的对照行，差值即格式化成本）。历史上 `bench_throughput` / `bench_latency`
+的 null 行用 `%v`、文件行用默认 pattern，两行不可比，会把时间戳格式化的成本
+记到写盘账上。
 
 ## 覆盖率
 

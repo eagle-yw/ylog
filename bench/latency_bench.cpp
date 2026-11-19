@@ -7,6 +7,10 @@
 //
 // 与 spdlog 的差异：ylog 没有 backtrace 与编译期关闭的宏，故缺少这两类场景；
 // 运行期关闭（Level::Off）保留，它量的是 should_log 的守门成本。
+//
+// 与 bench_throughput 一样，所有场景统一 pattern "%v"：本程序量的是 sink 路径，
+// 行与行相减（如 file_st - null_sink_st）才是写盘成本。pattern 的成本在
+// bench_formatter，三层分解在 bench_io。
 
 #include "benchmark/benchmark.h"
 
@@ -64,20 +68,22 @@ void bench_global_logger(benchmark::State& state, ylog::Level level) {
 }
 
 auto file_sink(std::string_view name) -> ylog::AnySink {
-    return ylog::AnySink{ylog::FileSink{bench::log_path(bench_directory, name)}};
+    return ylog::AnySink{ylog::FileSink{bench::log_path(bench_directory, name)}, "%v"};
 }
 
 auto rotating_sink(std::string_view name) -> ylog::AnySink {
     return ylog::AnySink{ylog::RotatingFileSink{ylog::RotatingFileConfig{
-        .filename = bench::log_path(bench_directory, name),
-        .max_size = rotating_size,
-        .max_files = rotating_files,
-    }}};
+                             .filename = bench::log_path(bench_directory, name),
+                             .max_size = rotating_size,
+                             .max_files = rotating_files,
+                         }},
+                         "%v"};
 }
 
 auto daily_sink(std::string_view name) -> ylog::AnySink {
-    return ylog::AnySink{ylog::DailyFileSink{
-        ylog::DailyFileConfig{.filename = bench::log_path(bench_directory, name)}}};
+    return ylog::AnySink{ylog::DailyFileSink{ylog::DailyFileConfig{
+                             .filename = bench::log_path(bench_directory, name)}},
+                         "%v"};
 }
 
 // 文件类场景：真实 I/O，必须用墙钟时间。
