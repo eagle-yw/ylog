@@ -223,16 +223,20 @@ private:
             [this](std::string_view why) { report(std::format("sink flush 失败：{}", why)); });
     }
 
-    // 工作线程：只执行队列交出来的步骤并回报。投递与落盘都在队列锁外，
-    // 「排空到哪一条为止」也不再由这里判断——停止时队列先给完剩余的 deliver，
-    // 最后才给 finished。
+    // 工作线程：整批取出、逐条投递，再一次性回报进度。投递与落盘都在队列锁外，
+    // 「排空到哪一条为止」不再由这里判断——停止时队列先给完剩余的批，最后才给 finished。
     auto run(std::stop_token token) -> void {
+        auto batch = std::vector<Message>{};
+        batch.reserve(detail::QueueBarrier::max_batch);
         for (;;) {
-            auto step = queue_.next_work(token);
+            batch.clear();  // 上一批的消息在锁外销毁
+            auto step = queue_.next_work(token, batch);
             switch (step.next) {
                 case detail::work::kind::deliver:
-                    write_to_sinks(*step.message);
-                    queue_.note_delivered(step.sequence);
+                    for (auto& message : batch) {
+                        write_to_sinks(message);
+                    }
+                    queue_.note_delivered(step.last_sequence);
                     break;
                 case detail::work::kind::flush:
                     flush_sinks();

@@ -36,8 +36,9 @@ struct admission {
 };
 
 // 工作线程的下一步：唯一判定「该投递、该落盘、还是该退出」的地方。
-// deliver 带出消息与它的序号，flush 带出待结算的目标；两种后续动作都在锁外进行，
-// 完成后分别用 note_delivered / note_flushed 回报。
+// deliver 只交出一批消息的「最后一条序号」——消息本身由调用方提供的缓冲承接，
+// 这样每批只分配一次、也不在锁内销毁上一批；flush 带出待结算的目标。
+// 两种后续动作都在锁外进行，完成后分别用 note_delivered / note_flushed 回报。
 struct work {
     enum class kind {
         deliver,
@@ -46,9 +47,8 @@ struct work {
     };
 
     kind next = kind::finished;
-    std::optional<Message> message;  // deliver
-    std::size_t sequence = 0;        // deliver：该条序号
-    std::size_t target = 0;          // flush：待结算的落盘目标
+    std::size_t last_sequence = 0;  // deliver：本批最后一条的序号
+    std::size_t target = 0;         // flush：待结算的落盘目标
 };
 
 // flush() 的入口判定：目标之内已全部落盘、工作线程还在、或工作线程已退出。
@@ -86,15 +86,22 @@ public:
     auto capacity() const -> std::size_t { return capacity_; }
     auto policy() const -> admission_policy { return policy_; }
 
+    // 一次出队的上限：把「每条一次锁 + 一次唤醒」摊薄成「每批一次」。
+    // 64 是折中——交接成本降到 1/64；flush_on 的落盘仍被屏障目标截断（见 next_work），
+    // 不额外推迟；停机排空只多走一趟循环。改动这个值要重跑 bench_async。
+    static constexpr std::size_t max_batch{64};
+
     // 生产者的唯一入口。Block 在内部等空位，另外两种当场决定后果。
     // flush_on_arrival：本条达到 Flush 阈值，入队成功后把屏障目标推到它——
     // 生产者不等落盘、不占槽位，与 flush() 共用同一套结算点。
     auto admit(Message message, bool flush_on_arrival) -> admission;
 
     // 工作线程的唯一判定点。返回 flush 时调用方落盘后须 note_flushed，
-    // 返回 deliver 时须投递后 note_delivered，返回 finished 时停止完成已记账并唤醒所有等待者。
-    auto next_work(const std::stop_token& token) -> work;
-    auto note_delivered(std::size_t sequence) -> void;
+    // 返回 deliver 时须把 batch 里的消息全部投递后 note_delivered(最后一条序号)，
+    // 返回 finished 时停止完成已记账并唤醒所有等待者。
+    // 前置条件：batch 为空，且其容量已由调用方保留（通常 reserve(max_batch)）。
+    auto next_work(const std::stop_token& token, std::vector<Message>& batch) -> work;
+    auto note_delivered(std::size_t last_sequence) -> void;
     auto note_flushed(std::size_t target) -> void;
 
     // 屏障：arm 决定这次 flush 等什么，await 等它结清。
@@ -178,7 +185,8 @@ inline auto QueueBarrier::admit(Message message, bool flush_on_arrival) -> admis
     return result;
 }
 
-inline auto QueueBarrier::next_work(const std::stop_token& token) -> work {
+inline auto QueueBarrier::next_work(const std::stop_token& token, std::vector<Message>& batch)
+    -> work {
     for (;;) {
         std::unique_lock lock(mutex_);
         cv_ready_.wait(lock, token,
@@ -189,17 +197,31 @@ inline auto QueueBarrier::next_work(const std::stop_token& token) -> work {
         if (flush_target_ > flushed_sequence_ && processed_sequence_ >= flush_target_) {
             auto target = flush_target_;
             lock.unlock();
-            return work{.next = work::kind::flush, .message = std::nullopt, .target = target};
+            return work{.next = work::kind::flush, .target = target};
         }
         if (!queue_.empty()) {
-            auto item = std::move(queue_.front());
-            queue_.pop_front();
+            // 待结算的屏障目标之内还剩多少条没写：本批不越过它，flush 才紧跟在
+            // 触发那一条之后，而不是被整批推迟。
+            auto count = std::min(queue_.size(), max_batch);
+            if (flush_target_ > processed_sequence_) {
+                count = std::min(count, flush_target_ - processed_sequence_);
+            }
+
+            auto last = std::size_t{0};
+            for (auto index = std::size_t{0}; index < count; ++index) {
+                last = queue_.front().sequence;
+                batch.push_back(std::move(queue_.front().message));
+                queue_.pop_front();
+            }
             lock.unlock();
-            // 槽位已空出：Block 的生产者不必等这条写完就能入队。
-            cv_space_.notify_one();
-            return work{.next = work::kind::deliver,
-                        .message = std::move(item.message),
-                        .sequence = item.sequence};
+            // 空出的槽位一次叫醒所有等待的生产者。逐条 notify_one 是 Block 吞吐被
+            // 拖到十万条/秒以下的原因：每条消息一次交接、一次上下文切换。
+            if (count > 1) {
+                cv_space_.notify_all();
+            } else {
+                cv_space_.notify_one();
+            }
+            return work{.next = work::kind::deliver, .last_sequence = last};
         }
         // 走到这里只剩「已收到停止请求」一种可能：屏障目标总是在入队成功后取刚分配的
         // 那个序号，而队列按 FIFO 写、覆盖策略只删队首，所以目标之内的序号要么被写出、
@@ -214,14 +236,15 @@ inline auto QueueBarrier::next_work(const std::stop_token& token) -> work {
         cv_space_.notify_all();
         cv_ready_.notify_all();
         cv_flushed_.notify_all();
-        return work{.next = work::kind::finished, .message = std::nullopt};
+        return work{.next = work::kind::finished};
     }
 }
 
-inline auto QueueBarrier::note_delivered(std::size_t sequence) -> void {
+inline auto QueueBarrier::note_delivered(std::size_t last_sequence) -> void {
     std::lock_guard lock(mutex_);
     // 写入在锁外完成之后才推进：提前推进会让 flush() 在消息没写完时返回。
-    processed_sequence_ = sequence + 1;
+    // 一批消息的序号连续（FIFO 出队、覆盖只删队首），因此一批只需报一次末尾序号。
+    processed_sequence_ = last_sequence + 1;
 }
 
 inline auto QueueBarrier::note_flushed(std::size_t target) -> void {
